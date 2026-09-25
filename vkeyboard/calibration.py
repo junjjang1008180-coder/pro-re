@@ -31,7 +31,7 @@ class Calibration:
         width = infer_width * 0.6
         height = width / UNITS_W * UNITS_H
         x = (infer_width - width) / 2
-        y = infer_height - height - infer_height * 0.04
+        y = infer_height * 0.47         # 화면 가운데~아래쪽: 손이 화면 밖으로 잘리지 않는 높이
         return cls(x, y, width, height, infer_width, infer_height)
 
     def validated(self) -> "Calibration":

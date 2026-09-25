@@ -47,6 +47,7 @@ class KeyCode(Enum):
     RIGHT_SHIFT = "RShift"
     BACKSPACE = "Bksp"
     ENTER = "Enter"
+    HAN_ENG = "Han/En"         # 한/영 전환 (OS 입력기 토글)
 
     @property
     def label(self) -> str:
@@ -85,7 +86,15 @@ FINGER_KEYS: Dict[Finger, Tuple[KeyCode, ...]] = {
     Finger.RIGHT_MIDDLE: (_K.I, _K.K, _K.COMMA),
     Finger.RIGHT_RING: (_K.O, _K.L, _K.PERIOD),
     Finger.RIGHT_PINKY: (_K.P, _K.SEMICOLON, _K.SLASH, _K.BACKSPACE, _K.ENTER, _K.RIGHT_SHIFT),
-    Finger.RIGHT_THUMB: (_K.SPACE,),
+    Finger.RIGHT_THUMB: (_K.SPACE, _K.HAN_ENG),
+}
+
+# 두벌식 자판: 한국어 모드일 때 키 위에 표시할 자모
+HANGUL_JAMO: Dict[KeyCode, str] = {
+    _K.Q: "ㅂ", _K.W: "ㅈ", _K.E: "ㄷ", _K.R: "ㄱ", _K.T: "ㅅ", _K.Y: "ㅛ", _K.U: "ㅕ", _K.I: "ㅑ",
+    _K.O: "ㅐ", _K.P: "ㅔ", _K.A: "ㅁ", _K.S: "ㄴ", _K.D: "ㅇ", _K.F: "ㄹ", _K.G: "ㅎ", _K.H: "ㅗ",
+    _K.J: "ㅓ", _K.K: "ㅏ", _K.L: "ㅣ", _K.Z: "ㅋ", _K.X: "ㅌ", _K.C: "ㅊ", _K.V: "ㅍ", _K.B: "ㅠ",
+    _K.N: "ㅜ", _K.M: "ㅡ",
 }
 
 
@@ -131,6 +140,8 @@ _ROWS: Tuple[Tuple[Tuple[KeyCode, float], ...], ...] = (
 )
 _SPACE_X = 3.5
 _SPACE_W = 6.5
+_HAN_ENG_X = 10.25          # 실제 한국어 키보드처럼 Space 오른쪽
+_HAN_ENG_W = 1.75
 
 
 def _build_keys() -> List[Key]:
@@ -141,6 +152,7 @@ def _build_keys() -> List[Key]:
             keys.append(Key(code, x, float(row), float(w)))
             x += w
     keys.append(Key(_K.SPACE, _SPACE_X, 3.0, _SPACE_W))
+    keys.append(Key(_K.HAN_ENG, _HAN_ENG_X, 3.0, _HAN_ENG_W))
     return keys
 
 
@@ -179,12 +191,29 @@ class KeyboardLayout:
                 return k
         return None
 
-    def key_for_finger(self, finger: Finger, p: Vec2) -> Optional[Key]:
-        """손가락 끝 아래의 키가 그 손가락 담당 키일 때만 반환."""
+    def key_for_finger(self, finger: Finger, p: Vec2, snap_radius: float = 0.0) -> Optional[Key]:
+        """손가락 끝 아래의 담당 키. 없으면 snap_radius(키 1칸 대비) 안에서 가장 가까운 담당 키.
+
+        손끝이 키 경계에 걸치거나 캘리브레이션이 조금 어긋나도 인식되도록 한다.
+        다른 손가락 담당 키 위에 확실히 올라가 있으면(그 키 중심에 더 가까우면) 스냅하지 않는다.
+        """
         k = self.hit_test(p)
         if k is not None and finger in k.fingers:
             return k
-        return None
+        if snap_radius <= 0:
+            return None
+        best, best_d = None, float("inf")
+        for key in self.keys:
+            if finger not in key.fingers:
+                continue
+            x, y, w, h = self.key_rect(key)
+            # 키 사각형까지의 거리 (키 1칸 크기로 정규화)
+            dx = max(x - p.x, 0.0, p.x - (x + w)) / self.unit_w
+            dy = max(y - p.y, 0.0, p.y - (y + h)) / self.unit_h
+            d = (dx * dx + dy * dy) ** 0.5
+            if d < best_d:
+                best, best_d = key, d
+        return best if best_d <= snap_radius else None
 
     def keys_for_finger(self, finger: Finger) -> List[Key]:
         return [k for k in self.keys if finger in k.fingers]

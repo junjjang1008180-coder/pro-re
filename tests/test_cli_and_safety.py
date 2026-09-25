@@ -152,15 +152,68 @@ def test_toggle_requires_lowering_hands_before_next_toggle():
     g = GestureController(1.0)
     hands = [open_palm_hand("Left", 400, 600), open_palm_hand("Right", 880, 600)]
     t = 0.0
-    while g.update(hands, t) is None:
+    for _ in range(60):
+        if g.update(hands, t) is not None:
+            break
         t += 1 / 30
     assert g.active
     assert all(g.update(hands, t + i / 30) is None for i in range(1, 90))   # 계속 펴고 있어도 재전환 없음
-    g.update([], t + 3.1)
-    t2 = t + 3.2
-    while g.update(hands, t2) is None:
+    for i in range(15):                                                    # 0.5초간 손을 내림
+        g.update([], t + 3.0 + i / 30)
+    t2 = t + 3.6
+    for _ in range(60):
+        if g.update(hands, t2) is not None:
+            break
         t2 += 1 / 30
     assert not g.active
+
+
+def test_brief_detection_dropout_does_not_reset_hold():
+    """1초 유지 중 인식이 0.3초 이내로 잠깐 끊겨도 진행이 이어진다."""
+    g = GestureController(1.0)
+    hands = [open_palm_hand("Left", 400, 600), open_palm_hand("Right", 880, 600)]
+    t = 0.0
+    for _ in range(15):
+        g.update(hands, t)
+        t += 1 / 30
+    for _ in range(5):                        # 약 0.17초 인식 끊김
+        g.update([], t)
+        t += 1 / 30
+    toggled = False
+    for _ in range(20):
+        toggled |= g.update(hands, t) is True
+        t += 1 / 30
+    assert toggled and g.active
+
+
+def test_manual_toggle_via_processor(cfg):
+    p = InputProcessor(cfg, Calibration.default(), (1920, 1080))
+    p.request_toggle()
+    _, events = p.process([], 0.0)
+    assert [(e.active, e.reason) for e in events if isinstance(e, ModeEvent)] == [(True, "manual")]
+    p.request_toggle()
+    _, events = p.process([], 0.1)
+    assert [(e.active, e.reason) for e in events if isinstance(e, ModeEvent)] == [(False, "manual")]
+
+
+def test_han_eng_key_toggles_language_and_sends_key():
+    b = RecordingInputBackend()
+    d = InputDispatcher(b, True)
+    d.set_active(True)
+    d.handle_key(KeyEvent(Finger.RIGHT_THUMB, KeyCode.HAN_ENG, 0, 20, 180, 0.9))
+    assert d.korean and d.last_key_text == "KO"
+    assert b.calls == [("key_down", KeyCode.HAN_ENG), ("key_up", KeyCode.HAN_ENG)]
+    d.handle_key(KEY)
+    assert d.last_key_text == "ㄹ"                   # 한국어 모드: F 키 = ㄹ
+    d.handle_key(KeyEvent(Finger.RIGHT_THUMB, KeyCode.HAN_ENG, 1, 20, 180, 0.9))
+    assert not d.korean and d.last_key_text == "EN"
+
+
+def test_han_eng_platform_codes():
+    from vkeyboard.input_backend import _WIN_VK, _X11_KEYSYM
+
+    assert _WIN_VK[KeyCode.HAN_ENG] == 0x15          # VK_HANGUL
+    assert _X11_KEYSYM[KeyCode.HAN_ENG] == "Hangul"
 
 
 def test_processor_forces_inactive_on_tracking_loss(cfg):
@@ -176,3 +229,15 @@ def test_processor_forces_inactive_on_tracking_loss(cfg):
         t += 1 / 30
     lost = [e for e in events if isinstance(e, ModeEvent) and not e.active]
     assert lost and lost[0].reason == "tracking_lost"
+
+
+@pytest.mark.parametrize("level, press, frames", [("low", 22.0, 3), ("normal", 18.0, 3), ("high", 13.0, 2)])
+def test_sensitivity_presets(level, press, frames):
+    cfg = parse_cli(["--sensitivity", level])
+    assert (cfg.press_distance, cfg.min_down_frames) == (press, frames)
+    assert cfg.release_distance < cfg.press_distance
+
+
+def test_explicit_values_override_sensitivity():
+    cfg = parse_cli(["--sensitivity", "high", "--press-distance", "16"])
+    assert cfg.press_distance == 16 and cfg.min_down_frames == 2

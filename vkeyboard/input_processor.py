@@ -11,9 +11,9 @@ from typing import Dict, List, Optional, Sequence, Tuple
 from .calibration import Calibration
 from .config import AppConfig
 from .events import ModeEvent
-from .finger_tracker import FingerTracker, normalize_handedness
-from .geometry import INDEX_TIP, HandObservation
-from .gesture_controller import GestureController
+from .finger_tracker import FingerSample, FingerTracker, normalize_handedness
+from .geometry import HandObservation
+from .gesture_controller import GestureController, MouseModeDetector
 from .keyboard_controller import FingerView, KeyboardController
 from .keyboard_layout import Finger, KeyboardLayout
 from .mouse_controller import MouseController, MouseView
@@ -33,7 +33,8 @@ class Snapshot:
     calibration: Calibration
     frame_id: int = -1
     infer_fps: float = 0.0
-    extra: dict = field(default_factory=dict)
+    palm_open: Dict[str, bool] = field(default_factory=dict)
+    mouse_mode: bool = False
 
 
 class InputProcessor:
@@ -46,25 +47,36 @@ class InputProcessor:
         self.keyboard = KeyboardController(cfg, self.layout)
         self.mouse = MouseController(cfg, screen_size)
         self.gesture = GestureController(cfg.palm_toggle_hold)
+        self.mouse_mode = MouseModeDetector()
         self.mouse_enabled = mouse_enabled
         self._pending_cal: Optional[Calibration] = None
         self._lock = threading.Lock()
         self._last_seen: Optional[float] = None
+        self._toggle_requested = False
 
     def set_calibration(self, cal: Calibration) -> None:
         """다른 스레드(메인)에서 호출 가능. 다음 프레임에 반영된다."""
         with self._lock:
             self._pending_cal = cal
 
+    def request_toggle(self) -> None:
+        """메인 스레드에서 호출: 다음 프레임에 ACTIVE/INACTIVE 수동 전환."""
+        with self._lock:
+            self._toggle_requested = True
+
     def _apply_pending(self) -> None:
         with self._lock:
             cal, self._pending_cal = self._pending_cal, None
+            toggle, self._toggle_requested = self._toggle_requested, False
+        if toggle:
+            self._manual_toggle = True
         if cal is not None:
             self.calibration = cal
             self.layout = KeyboardLayout.from_calibration(cal)
             self.keyboard.set_layout(self.layout)
 
     def process(self, hands: Sequence[HandObservation], t: float) -> Tuple[Snapshot, list]:
+        self._manual_toggle = False
         self._apply_pending()
         split_x = self.layout.x + self.layout.width / 2 if self.cfg.handedness == "position" else None
         hands = normalize_handedness(hands, split_x)
@@ -73,6 +85,12 @@ class InputProcessor:
         toggled = self.gesture.update(hands, t)
         if toggled is not None:
             events.append(ModeEvent(toggled, "gesture", t))
+        if self._manual_toggle:
+            new_state = not self.gesture.active
+            self.gesture.set_active(new_state)
+            events.append(ModeEvent(new_state, "manual", t))
+            if new_state:
+                self._last_seen = t
 
         # 손 추적 실패: ACTIVE 중 손이 일정 시간 사라지면 강제 INACTIVE
         if hands:
@@ -86,19 +104,24 @@ class InputProcessor:
         # 전환 제스처(양손 펼침) 중에는 키 입력을 만들지 않는다
         keys_active = active and self.gesture.progress == 0.0
 
+        right = next((h for h in hands if h.handedness == "Right"), None)
+        # 마우스 모드는 키보드 위치와 무관하게 '오른손 가리키기 자세'로 켠다 -> 키보드를 어디에 둬도 겹치지 않음
+        mouse_mode = self.mouse_mode.update(right, t) if self.mouse_enabled else False
+
         samples = self.fingers.update(hands, t)
+        if mouse_mode:
+            # 마우스 모드 중 오른손은 키 입력에 쓰지 않는다
+            for f, s in samples.items():
+                if f.hand == "Right":
+                    samples[f] = FingerSample(f, False, "mouse", tip=s.tip, raw_tip=s.raw_tip,
+                                              hand_size=s.hand_size, confidence=s.confidence)
         events.extend(self.keyboard.update(samples, t, keys_active))
 
-        right = next((h for h in hands if h.handedness == "Right"), None)
-        suspended = True
-        if right is not None:
-            margin = self.layout.unit_w * 0.5
-            suspended = self.layout.contains(right.landmarks[INDEX_TIP], margin)
-        events.extend(self.mouse.update(right, t, active and self.mouse_enabled,
-                                        suspended or not self.mouse_enabled))
+        events.extend(self.mouse.update(right, t, active and self.mouse_enabled, not mouse_mode))
 
         conf = min((h.confidence for h in hands), default=0.0)
         snap = Snapshot(t=t, hands=list(hands), finger_views=dict(self.keyboard.views), active=active,
                         toggle_progress=self.gesture.progress, tracking_confidence=conf,
-                        mouse=self.mouse.view, calibration=self.calibration)
+                        mouse=self.mouse.view, calibration=self.calibration,
+                        palm_open=dict(self.gesture.open_state), mouse_mode=mouse_mode)
         return snap, events

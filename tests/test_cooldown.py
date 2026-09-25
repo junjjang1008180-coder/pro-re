@@ -103,3 +103,35 @@ def test_key_locked_at_press_start(cfg):
     for i, (tip, d) in enumerate(seq):
         events += kc.update({Finger.LEFT_INDEX: sample(Finger.LEFT_INDEX, tip, d)}, i * DT, True)
     assert [e.key for e in events] == [KeyCode.F]
+
+
+# ---------------------------------------------------------------- 인식률 개선
+def test_quick_tap_detected_on_15fps_camera(cfg):
+    """15fps 카메라에서 약 0.13초짜리 짧은 '톡' 누름도 인식 (2프레임이면 확정)."""
+    kc, layout = make(cfg)
+    ev, _ = run_press(kc, Finger.LEFT_INDEX, layout.key_center(KeyCode.F), [0, 0, 0, 22, 22, 0, 0], dt=1 / 15)
+    assert [e.key for e in ev] == [KeyCode.F]
+
+
+def test_30fps_still_requires_three_frames(cfg):
+    kc, layout = make(cfg)
+    ev, _ = run_press(kc, Finger.LEFT_INDEX, layout.key_center(KeyCode.F), [0, 0, 0, 22, 22, 0, 0], dt=1 / 30)
+    assert ev == []                                   # 30fps 에서 2프레임(0.067초)은 노이즈로 간주
+
+
+def test_tip_slightly_outside_key_snaps_to_owned_key(cfg):
+    kc, layout = make(cfg)
+    x, y, w, h = layout.key_rect(layout.key(KeyCode.F))
+    just_below = P(x + w / 2, y + h + h * 0.3)       # F 아래 V 키 경계 근처가 아니라 F-V 사이 틈 (V 도 검지 담당)
+    left_of_a = P(layout.key_rect(layout.key(KeyCode.A))[0] - w * 0.3, y + h / 2)   # A 왼쪽 Caps 쪽으로 살짝 벗어남
+    assert layout.key_for_finger(Finger.LEFT_PINKY, left_of_a, 0.6).code in (KeyCode.A, KeyCode.CAPS_LOCK)
+    assert layout.key_for_finger(Finger.LEFT_INDEX, just_below, 0.6) is not None
+    far = P(x + w / 2, y - h * 3)                    # 키보드 훨씬 위 -> 스냅 안 함
+    assert layout.key_for_finger(Finger.LEFT_INDEX, far, 0.6) is None
+
+
+def test_snap_does_not_steal_other_fingers_key(cfg):
+    kc, layout = make(cfg)
+    d_center = layout.key_center(KeyCode.D)          # 중지 담당 D 한가운데에 검지가 있으면
+    assert layout.key_for_finger(Finger.LEFT_INDEX, d_center, 0.6) is None or \
+        layout.key_for_finger(Finger.LEFT_INDEX, d_center, 0.6).code is not KeyCode.D

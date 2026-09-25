@@ -46,6 +46,8 @@ class HandTracker:
             min_tracking_confidence=cfg.min_tracking_confidence,
         )
         self._landmarker = vision.HandLandmarker.create_from_options(options)
+        self.handedness_mode = cfg.handedness
+        self.presence_threshold = cfg.min_tracking_confidence
         self._last_ts = -1
 
     def detect(self, frame_bgr_infer, timestamp_ms: int) -> List[HandObservation]:
@@ -63,6 +65,11 @@ class HandTracker:
                 cat = result.handedness[i][0]
                 label, score = cat.category_name, float(cat.score)
             pts = [self.scaler.normalized_to_infer(lm.x, lm.y) for lm in lms]
+            # MediaPipe 는 손 존재 신뢰도(min_hand_presence_confidence)를 통과한 손만 돌려준다.
+            # handedness 점수는 '왼손/오른손 판별' 확신도라, 손등이 보이는 타이핑 자세에서는 낮아진다.
+            # 위치 기준 좌우 판별 모드에서는 이 점수로 손가락을 버리지 않도록 통과 기준 이상으로 올려 준다.
+            if self.handedness_mode == "position":
+                score = max(score, self.presence_threshold)
             hands.append(HandObservation(label, pts, score))
         return hands
 

@@ -16,7 +16,7 @@ from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
 
 from .events import KeyEvent, MouseAction, MouseEvent
-from .keyboard_layout import KeyCode
+from .keyboard_layout import HANGUL_JAMO, KeyCode
 
 
 class MouseButton(Enum):
@@ -108,7 +108,8 @@ _WIN_VK: Dict[KeyCode, int] = {**{KeyCode(c): ord(c) for c in "ABCDEFGHIJKLMNOPQ
                                KeyCode.SEMICOLON: 0xBA, KeyCode.COMMA: 0xBC, KeyCode.PERIOD: 0xBE,
                                KeyCode.SLASH: 0xBF, KeyCode.SPACE: 0x20, KeyCode.TAB: 0x09,
                                KeyCode.CAPS_LOCK: 0x14, KeyCode.LEFT_SHIFT: 0xA0,
-                               KeyCode.RIGHT_SHIFT: 0xA1, KeyCode.BACKSPACE: 0x08, KeyCode.ENTER: 0x0D}
+                               KeyCode.RIGHT_SHIFT: 0xA1, KeyCode.BACKSPACE: 0x08, KeyCode.ENTER: 0x0D,
+                               KeyCode.HAN_ENG: 0x15}   # VK_HANGUL: 한국어 IME 한/영 전환
 
 
 class WindowsInputBackend(InputBackend):
@@ -194,7 +195,7 @@ _X11_KEYSYM: Dict[KeyCode, str] = {**{KeyCode(c): c.lower() for c in "ABCDEFGHIJ
                                    KeyCode.SPACE: "space", KeyCode.TAB: "Tab",
                                    KeyCode.CAPS_LOCK: "Caps_Lock", KeyCode.LEFT_SHIFT: "Shift_L",
                                    KeyCode.RIGHT_SHIFT: "Shift_R", KeyCode.BACKSPACE: "BackSpace",
-                                   KeyCode.ENTER: "Return"}
+                                   KeyCode.ENTER: "Return", KeyCode.HAN_ENG: "Hangul"}
 
 
 class X11InputBackend(InputBackend):
@@ -312,11 +313,24 @@ class MacInputBackend(InputBackend):
         self._cg.CGEventPost(self._K_CG_HID_EVENT_TAP, ev)
         self._cf.CFRelease(ev)
 
+    _MAC_CONTROL = 0x3B
+
     def key_down(self, code: KeyCode) -> None:
         self._post(self._cg.CGEventCreateKeyboardEvent(None, _MAC_VK[code], True))
 
     def key_up(self, code: KeyCode) -> None:
         self._post(self._cg.CGEventCreateKeyboardEvent(None, _MAC_VK[code], False))
+
+    def tap_key(self, code: KeyCode) -> None:
+        if code is KeyCode.HAN_ENG:
+            # macOS 에는 한/영 키코드가 없음 -> 기본 입력 소스 전환 단축키 Ctrl+Space
+            cg = self._cg
+            self._post(cg.CGEventCreateKeyboardEvent(None, self._MAC_CONTROL, True))
+            self._post(cg.CGEventCreateKeyboardEvent(None, _MAC_VK[KeyCode.SPACE], True))
+            self._post(cg.CGEventCreateKeyboardEvent(None, _MAC_VK[KeyCode.SPACE], False))
+            self._post(cg.CGEventCreateKeyboardEvent(None, self._MAC_CONTROL, False))
+            return
+        super().tap_key(code)
 
     def mouse_move(self, x: int, y: int) -> None:
         self._pos = _CGPoint(float(x), float(y))
@@ -406,6 +420,7 @@ class InputDispatcher:
         self.pending_shift: Optional[KeyCode] = None
         self._held_buttons: Set[MouseButton] = set()
         self._held_keys: Set[KeyCode] = set()
+        self.korean = False            # 한/영 키로 전환한 현재 언어 (화면 표시용)
         self.last_key_text = "-"
         self.last_mouse_text = "-"
         self.sent_count = 0
@@ -426,9 +441,14 @@ class InputDispatcher:
             self.pending_shift = None if self.pending_shift else ev.key
             self.last_key_text = "Shift (next key)" if self.pending_shift else "Shift off"
             return False
+        if ev.key is KeyCode.HAN_ENG:
+            self.korean = not self.korean
+            self.last_key_text = "KO" if self.korean else "EN"
         shift = self.pending_shift if ev.key.char is not None else None
         self.pending_shift = None
-        self.last_key_text = (f"Shift+{ev.key.label}" if shift else ev.key.label)
+        if ev.key is not KeyCode.HAN_ENG:
+            label = HANGUL_JAMO.get(ev.key, ev.key.label) if self.korean else ev.key.label
+            self.last_key_text = f"Shift+{label}" if shift else label
         if not self.can_send:
             return False
         if shift:

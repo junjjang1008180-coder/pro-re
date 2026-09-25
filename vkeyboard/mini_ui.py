@@ -2,10 +2,12 @@
 
 모든 판정 좌표는 1280x720 추론 좌표계이므로 FrameScaler 로 캡처 해상도(4K)로 스케일업해 그린다.
 UI 크기는 캔버스 높이 720 기준 단위(s)로 정의해 해상도와 무관하게 같은 비율로 보인다.
-OpenCV Hershey 폰트는 한글을 그릴 수 없어 화면 문구는 영어로 표시한다.
+기본 문구는 Hershey 폰트(영문)로 그리고, 한글(한/영 키, 두벌식 자모)은 OpenCV 5 의 FontFace 로
+시스템 한글 폰트(맑은 고딕 등)를 불러와 그린다. 한글 폰트가 없으면 영문 대체 문구를 쓴다.
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass, field
 from typing import Dict, List, Optional, Tuple
 
@@ -18,7 +20,7 @@ from .frame_scaler import FrameScaler
 from .geometry import HAND_CONNECTIONS, WRIST, Vec2
 from .input_processor import Snapshot
 from .input_state import FingerState
-from .keyboard_layout import FINGER_ORDER, Finger, KeyboardLayout, KeyCode
+from .keyboard_layout import FINGER_ORDER, HANGUL_JAMO, Finger, KeyboardLayout, KeyCode
 from .practice_mode import PracticeResult, PracticeSession
 
 FONT = cv2.FONT_HERSHEY_SIMPLEX
@@ -66,6 +68,36 @@ CARD_R = 10      # 카드 모서리 반경
 RIGHT_W = 236    # 오른쪽 카드 폭
 
 
+_UNI_FONT_PATHS = (
+    "C:/Windows/Fonts/malgun.ttf",                                   # Windows 맑은 고딕
+    "/System/Library/Fonts/AppleSDGothicNeo.ttc",                    # macOS
+    "/usr/share/fonts/truetype/nanum/NanumGothic.ttf",               # Linux (fonts-nanum)
+    "/usr/share/fonts/opentype/noto/NotoSansCJK-Regular.ttc",        # Linux (fonts-noto-cjk)
+)
+_uni_font = None
+_uni_font_loaded = False
+
+
+def unicode_font():
+    """한글을 그릴 수 있는 FontFace (OpenCV 5 이상 + 시스템 한글 폰트). 없으면 None."""
+    global _uni_font, _uni_font_loaded
+    if not _uni_font_loaded:
+        _uni_font_loaded = True
+        if hasattr(cv2, "FontFace"):
+            for path in _UNI_FONT_PATHS:
+                if os.path.exists(path):
+                    try:
+                        _uni_font = cv2.FontFace(path)
+                        break
+                    except cv2.error:
+                        continue
+    return _uni_font
+
+
+def _is_ascii(txt: str) -> bool:
+    return all(ord(c) < 128 for c in txt)
+
+
 def short_name(f: Finger) -> str:
     return ("L " if f.hand == "Left" else "R ") + f.digit
 
@@ -88,6 +120,10 @@ class RenderInfo:
     practice: Optional[PracticeSession] = None
     practice_result: Optional[PracticeResult] = None
     message: str = ""
+    korean: bool = False               # 한/영 키로 전환한 현재 언어
+    last_key_code: Optional[KeyCode] = None     # 마지막으로 입력된 키 (HUD 배지용)
+    last_key_finger: Optional[Finger] = None
+    last_key_time: float = -1e9
 
 
 # ---------------------------------------------------------------------------
@@ -139,6 +175,7 @@ class Renderer:
     def __init__(self, scaler: FrameScaler) -> None:
         self.scaler = scaler
         self.s = 1.0
+        self._uni_w: Dict[tuple, int] = {}
 
     # --- 단위 변환 / 텍스트 -------------------------------------------------
     def u(self, v: float) -> int:
@@ -153,11 +190,22 @@ class Renderer:
         fs = scale * self.s
         t = self.th(weight)
         org = (int(x), int(y))
+        if not _is_ascii(txt) and unicode_font() is not None:
+            cv2.putText(canvas, txt, org, color, unicode_font(), int(round(fs * 30)))
+            return
         if shadow:
             cv2.putText(canvas, txt, (org[0] + self.th(), org[1] + self.th()), FONT, fs, BLACK, t + self.th(), AA)
         cv2.putText(canvas, txt, org, FONT, fs, color, t, AA)
 
     def text_w(self, txt: str, scale: float, weight: float = 1.0) -> int:
+        if not _is_ascii(txt) and unicode_font() is not None:
+            key = (txt, round(scale * self.s, 3))
+            if key not in self._uni_w:
+                dummy = np.zeros((1, 1, 3), np.uint8)
+                end, _ = cv2.putText(dummy, txt, (0, 0), (0, 0, 0), unicode_font(),
+                                     int(round(scale * self.s * 30)))
+                self._uni_w[key] = int(end[0])
+            return self._uni_w[key]
         (w, _), _ = cv2.getTextSize(txt, FONT, scale * self.s, self.th(weight))
         return w
 
@@ -245,14 +293,8 @@ class Renderer:
                 rounded_rect(canvas, *p0, *p1, radius, ACCENT, self.th(1))
             else:
                 rounded_rect(canvas, *p0, *p1, radius, KEY_EDGE, self.th(1))
-            label = code.label
-            scale = 0.5 if len(label) == 1 else 0.36
             color = BLACK if flashing else (TEXT if code in selected else (225, 220, 215))
-            tw, tht = self.text_w(label, scale), self.text_h(scale)
-            if len(label) == 1:
-                self.text(canvas, label, (p0[0] + p1[0]) / 2 - tw / 2, (p0[1] + p1[1]) / 2 + tht / 2, scale, color)
-            else:
-                self.text(canvas, label, p0[0] + self.u(7), p1[1] - self.u(7), scale, color)
+            self._key_label(canvas, code, p0, p1, color, info.korean)
 
         if info.calibration_mode:
             rounded_rect(canvas, bx0 - pad, by0 - pad, bx1 + pad, by1 + pad, self.u(12), ACCENT, self.th(2))
@@ -260,6 +302,33 @@ class Renderer:
             for cx, cy in ((bx0 - pad, by0 - pad), (bx1 + pad, by0 - pad), (bx0 - pad, by1 + pad),
                            (bx1 + pad, by1 + pad)):
                 cv2.rectangle(canvas, (cx - hs, cy - hs), (cx + hs, cy + hs), ACCENT, -1)
+
+    def _key_label(self, canvas, code: KeyCode, p0, p1, color, korean: bool) -> None:
+        cx, cy = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
+        has_font = unicode_font() is not None
+        if code is KeyCode.HAN_ENG:
+            label = "한/영" if has_font else "Han/En"
+            tag = "KO" if korean else "EN"
+            self.text(canvas, label, p0[0] + self.u(7), p1[1] - self.u(8), 0.36, color)
+            tw = self.text_w(tag, 0.34, 1.3)
+            self.text(canvas, tag, p1[0] - tw - self.u(7), p0[1] + self.u(15), 0.34,
+                      ACCENT if korean else MUTED, 1.3)
+            return
+        label = code.label
+        if len(label) != 1:
+            self.text(canvas, label, p0[0] + self.u(7), p1[1] - self.u(7), 0.36, color)
+            return
+        jamo = HANGUL_JAMO.get(code)
+        if korean and jamo and has_font:
+            # 한국어 모드: 자모를 크게, 영문은 왼쪽 위에 작게
+            jw = self.text_w(jamo, 0.55)
+            self.text(canvas, jamo, cx - jw / 2, cy + self.text_h(0.5) / 2 + self.u(3), 0.55, color)
+            self.text(canvas, label, p0[0] + self.u(5), p0[1] + self.u(12), 0.3, MUTED)
+            return
+        tw, tht = self.text_w(label, 0.5), self.text_h(0.5)
+        self.text(canvas, label, cx - tw / 2, cy + tht / 2, 0.5, color)
+        if jamo and has_font:
+            self.text(canvas, jamo, p1[0] - self.u(13), p0[1] + self.u(13), 0.3, FAINT)
 
     # --- 손 ------------------------------------------------------------------
     def draw_hands(self, canvas, snap: Snapshot) -> None:
@@ -284,7 +353,8 @@ class Renderer:
             p = self.scaler.infer_to_display_pt(v.tip)
             col = FINGER_COLORS[f]
             if not v.valid:
-                cv2.circle(canvas, p, self.u(6), BAD, self.th(1.5), AA)
+                if v.reason != "mouse":
+                    cv2.circle(canvas, p, self.u(6), BAD, self.th(1.5), AA)
                 continue
             ring = STATE_STYLE[v.state][1]
             cv2.circle(canvas, p, self.u(9), ring, self.th(2 if v.state is FingerState.HOVER else 3), AA)
@@ -322,13 +392,20 @@ class Renderer:
             ("Tracking", f"{snap.tracking_confidence if snap else 0:.2f}   {len(snap.hands) if snap else 0} hands",
              GOOD if snap and snap.tracking_confidence >= 0.75 else (WARN if snap and snap.hands else MUTED)),
             ("Last key", info.last_key, TEXT),
-            ("Mouse", info.last_mouse, TEXT),
+            ("Mouse", ("ON  " if snap is not None and snap.mouse_mode else "") + info.last_mouse,
+             ACCENT if snap is not None and snap.mouse_mode else TEXT),
+            ("Lang", "KO  한국어" if info.korean else "EN  English", ACCENT if info.korean else TEXT),
         ]
+        if snap is not None and snap.hands:
+            # 손바닥 펼침 인식 상태: ACTIVE 전환이 안 될 때 어느 손이 문제인지 보여 줌
+            lo, ro = snap.palm_open.get("Left", False), snap.palm_open.get("Right", False)
+            rows.append(("Palms", f"L {'open' if lo else '--'}   R {'open' if ro else '--'}",
+                         GOOD if lo and ro else (WARN if lo or ro else MUTED)))
         toggling = snap is not None and snap.toggle_progress > 0
         if info.calibration_mode:
             hints = ["i j k l  move    + -  size", "[ ]  height   F  fit to fingers", "S  save   R  reset   C  done"]
         else:
-            hints = ["ESC  quit      C  calibrate"]
+            hints = ["ESC  quit    C  calibrate    A  on/off"]
         h = self.u(16) + self.u(28) + self.u(14) + row * len(rows) + self.u(8)
         h += self.u(34) if toggling else 0
         h += self.u(17) * len(hints) + self.u(10)
@@ -397,9 +474,11 @@ class Renderer:
                 cv2.circle(canvas, (x0 + px + self.u(5), cy), self.u(4.5), FINGER_COLORS[f], -1, AA)
                 self.text(canvas, f.digit, x0 + px + self.u(16), y - self.u(5), 0.38,
                           TEXT if v is not None and v.valid else MUTED)
-                sx = x0 + self.u(118)
+                sx = x0 + self.u(98)
                 if v is None or v.reason == "missing":
                     self.text(canvas, "--", sx, y - self.u(5), 0.36, FAINT)
+                elif v.reason == "mouse":
+                    self.text(canvas, "mouse", sx, y - self.u(5), 0.34, ACCENT)
                 elif not v.valid:
                     self.text(canvas, v.reason.replace("_", " ")[:8], sx, y - self.u(5), 0.34, BAD)
                 else:
@@ -407,6 +486,18 @@ class Renderer:
                     ph = self.text_h(0.32) + self.u(6)
                     self.pill(canvas, name, sx, cy - ph / 2, 0.32, BLACK if v.state is not FingerState.HOVER
                               else TEXT, col if v.state is not FingerState.HOVER else (72, 62, 56), pad=6)
+                if v is not None and v.valid and v.press_threshold > 0:
+                    # 누름 깊이 게이지: 흰 눈금 = 입력 임계값. 게이지가 눈금을 넘어야 입력됨
+                    gx0, gx1 = x0 + self.u(152), x0 + self.u(180)
+                    gy = cy + self.u(1)
+                    ratio = max(0.0, min(1.5, v.dy / v.press_threshold))
+                    rounded_rect(canvas, gx0, gy - self.u(2), gx1, gy + self.u(2), self.u(2), (70, 60, 54))
+                    fill_x = gx0 + int((gx1 - gx0) * ratio / 1.5)
+                    gcol = GOOD if ratio >= 1.0 else (WARN if ratio >= 0.55 else MUTED)
+                    if fill_x > gx0:
+                        rounded_rect(canvas, gx0, gy - self.u(2), fill_x, gy + self.u(2), self.u(2), gcol)
+                    tick = gx0 + int((gx1 - gx0) / 1.5)
+                    cv2.line(canvas, (tick, gy - self.u(4)), (tick, gy + self.u(4)), WHITE, self.th(1), AA)
                 key = v.selected_key.label if (v is not None and v.selected_key) else ""
                 if key:
                     self.text(canvas, key, x0 + w - px - self.text_w(key, 0.4, 1.3), y - self.u(5), 0.4,
@@ -425,29 +516,77 @@ class Renderer:
         h = self.u(34) + max(kb_h, mouse_h) + self.u(24)
         glass_panel(canvas, x0, top, x0 + w, top + h, self.u(CARD_R))
         self.text(canvas, "INPUT", x0 + px, top + self.u(22), 0.42, TEXT, 1.4)
-
-        # 미니 키보드
         kx, ky = x0 + px, top + self.u(34)
+        self.mini_keyboard(canvas, kx, ky, kb_w, snap, info)
+        self.text(canvas, f"key  {info.last_key}", kx, ky + kb_h + self.u(16), 0.34, MUTED)
+        self.mini_mouse(canvas, x0 + w - px - mouse_w, top + self.u(30), mouse_w, mouse_h, snap, info)
+
+    def mini_keyboard(self, canvas, kx: int, ky: int, kb_w: int, snap: Optional[Snapshot],
+                      info: RenderInfo, labels: bool = False) -> int:
+        """작은 키보드. 높이를 반환.
+
+        손가락이 올라간 키 = 손가락 색 테두리, 누르는 중 = 주황, 눌림 확정 = 초록,
+        입력 순간 = 흰색으로 살짝 커짐. labels=True 면 키 글자(한국어 모드면 자모)도 표시.
+        """
+        kb_h = int(kb_w / 13.5 * 4)
         mini = KeyboardLayout(kx, ky, kb_w, kb_h)
         selected: Dict[KeyCode, Finger] = {}
+        state_of: Dict[KeyCode, FingerState] = {}
         if snap is not None:
             for f, v in snap.finger_views.items():
                 if v.selected_key is not None and v.valid:
                     selected[v.selected_key] = f
+                    state_of[v.selected_key] = v.state
         g = max(1, self.u(1))
+        base = (70, 60, 54)
+        flashing_keys = []
         for k in mini.keys:
             x, y, kw, kh = mini.key_rect(k)
-            fill = (70, 60, 54)
-            if info.key_highlights.get(k.code, 0) > info.now:
-                fill = WHITE
-            elif k.code in selected:
-                fill = FINGER_COLORS[selected[k.code]]
-            rounded_rect(canvas, x + g, y + g, x + kw - g, y + kh - g, self.u(2), fill)
-        self.text(canvas, f"key  {info.last_key}", kx, ky + kb_h + self.u(16), 0.34, MUTED)
+            code = k.code
+            state = state_of.get(code)
+            fill, edge, txt = base, None, (200, 192, 186)
+            if info.key_highlights.get(code, 0) > info.now:
+                flashing_keys.append((k, x, y, kw, kh))
+                continue
+            if state is FingerState.PRESSED:
+                fill, txt = GOOD, BLACK
+            elif state is FingerState.PRESSING:
+                fill, txt = WARN, BLACK
+            elif code in selected:
+                col = FINGER_COLORS[selected[code]]
+                fill = tuple(int(c * 0.5 + b * 0.5) for c, b in zip(col, base))
+                edge, txt = col, WHITE
+            elif code is KeyCode.HAN_ENG and info.korean:
+                fill = tuple(int(c * 0.6) for c in ACCENT)
+            rounded_rect(canvas, x + g, y + g, x + kw - g, y + kh - g, self.u(2.5), fill)
+            if edge is not None:
+                rounded_rect(canvas, x + g, y + g, x + kw - g, y + kh - g, self.u(2.5), edge, self.th(1.5))
+            if labels:
+                self._mini_label(canvas, code, x, y, kw, kh, txt, info.korean)
+        # 입력 순간 키는 흰색으로 조금 크게 (다른 키 위에 그려서 '팝' 효과)
+        for k, x, y, kw, kh in flashing_keys:
+            p = self.u(2)
+            rounded_rect(canvas, x - p, y - p, x + kw + p, y + kh + p, self.u(3.5), WHITE)
+            if labels:
+                self._mini_label(canvas, k.code, x, y, kw, kh, BLACK, info.korean, bold=True)
+        return kb_h
 
-        # 미니 마우스
-        mx0 = x0 + w - px - mouse_w
-        my0 = top + self.u(30)
+    def _mini_label(self, canvas, code: KeyCode, x, y, kw, kh, color, korean: bool, bold: bool = False) -> None:
+        if code is KeyCode.HAN_ENG:
+            label = "한" if unicode_font() is not None else "H"
+        elif code is KeyCode.SPACE:
+            label = "space"
+        elif len(code.label) == 1:
+            label = HANGUL_JAMO.get(code, code.label) if (korean and unicode_font() is not None) else code.label
+        else:
+            return                                   # Tab/Shift 등 긴 이름은 너무 작아서 생략
+        scale = 0.28 if len(label) > 1 else 0.34
+        tw, th = self.text_w(label, scale), self.text_h(scale)
+        self.text(canvas, label, x + kw / 2 - tw / 2, y + kh / 2 + th / 2, scale, color, 1.4 if bold else 1.0)
+
+    def mini_mouse(self, canvas, mx0: int, my0: int, mouse_w: int, mouse_h: int, snap: Optional[Snapshot],
+                   info: RenderInfo) -> None:
+        """작은 마우스 아이콘 (핀치 중 청록, 클릭 순간 초록, 드래그 주황)."""
         mv = snap.mouse if snap else None
         off = mv is None or mv.suspended
         body = (62, 54, 48) if off else (96, 84, 76)
