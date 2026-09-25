@@ -39,7 +39,7 @@ def _print_banner(cfg: AppConfig) -> None:
         print(f" 모드: 테스트 모드 (실제 입력 없음) test_mode={cfg.test_mode} "
               f"enable_real_input={cfg.enable_real_input}")
     print(" 시작 상태: INACTIVE — 양손 손바닥을 펴고 1초 유지하면 ACTIVE")
-    print(" ESC: 즉시 종료 / c: 캘리브레이션")
+    print(" ESC: 즉시 종료 / c: 캘리브레이션 / a: ACTIVE 수동 전환")
     print("=" * 60)
 
 
@@ -59,9 +59,18 @@ def run(cfg: AppConfig) -> int:
     from .hand_tracker import HandTracker
     from .input_processor import InputProcessor
     from .mini_ui import RenderInfo, Renderer
+    from .overlay import DesktopOverlay
     from .pipeline import CaptureThread, FpsCounter, InferenceThread, display_size, open_camera
 
     _print_banner(cfg)
+    if sys.platform.startswith("win"):
+        # 고해상도 화면에서 창/좌표가 흐리게 확대되지 않도록 (화면 크기 조회 전에 설정)
+        try:
+            import ctypes
+
+            ctypes.windll.user32.SetProcessDPIAware()
+        except (AttributeError, OSError):
+            pass
 
     # --- 입력 백엔드: 두 조건이 동시에 만족될 때만 실제 OS 백엔드 생성 ---
     if cfg.real_input_allowed:
@@ -79,6 +88,7 @@ def run(cfg: AppConfig) -> int:
     if logger:
         print(f"[정보] 입력 이벤트 CSV 로깅: {cfg.log_input}")
 
+    overlay = None
     capture: Optional[CaptureThread] = None
     inference: Optional[InferenceThread] = None
     tracker = None
@@ -119,6 +129,8 @@ def run(cfg: AppConfig) -> int:
         inference.start()
 
         renderer = Renderer(scaler)
+        if cfg.overlay:
+            overlay = DesktopOverlay(backend.screen_size(), cfg.overlay_corner, cfg.overlay_scale)
         fps = FpsCounter()
         info = RenderInfo(now=time.monotonic(), capture_size=(cw, ch), test_mode=cfg.test_mode,
                           real_input=cfg.real_input_allowed, backend_name=backend.name, practice=practice)
@@ -157,9 +169,11 @@ def run(cfg: AppConfig) -> int:
                         message_until = now + 2.0
                         print("[안전] 손 추적 실패 → INACTIVE 전환, 실제 입력 중지")
                     else:
-                        print(f"[상태] {'ACTIVE' if ev.active else 'INACTIVE'}")
+                        how = " (a 키)" if ev.reason == "manual" else ""
+                        print(f"[상태] {'ACTIVE' if ev.active else 'INACTIVE'}{how}")
                 elif isinstance(ev, KeyEvent):
                     info.key_highlights[ev.key] = now + KEY_HIGHLIGHT_TIME
+                    info.last_key_code, info.last_key_finger, info.last_key_time = ev.key, ev.finger, now
                     if logger:
                         logger.log_key(ev)
                     if cfg.beep:
@@ -177,6 +191,7 @@ def run(cfg: AppConfig) -> int:
                     else:
                         dispatcher.handle_key(ev)
                         info.last_key = f"{dispatcher.last_key_text} ({ev.finger.value})"
+                        info.korean = dispatcher.korean
                 elif isinstance(ev, MouseEvent):
                     if ev.action is not MouseAction.MOVE:
                         info.mouse_flash = (ev.action, now + MOUSE_FLASH_TIME)
@@ -202,6 +217,8 @@ def run(cfg: AppConfig) -> int:
                     canvas = cv2.resize(canvas, (dw, dh), interpolation=cv2.INTER_AREA)
                 cv2.imshow(WINDOW, canvas)
                 shown = True
+                if overlay is not None:
+                    overlay.show(snap, info)
 
             key = cv2.waitKey(1) & 0xFF
             if key == 27:  # ESC
@@ -213,7 +230,10 @@ def run(cfg: AppConfig) -> int:
                 break
 
             # --- 캘리브레이션 / 연습 모드 키 ---
-            if key == ord("c"):
+            if key == ord("a") and not calibrating:
+                # 제스처 인식이 잘 안 될 때를 위한 수동 ACTIVE/INACTIVE 전환
+                processor.request_toggle()
+            elif key == ord("c"):
                 calibrating = not calibrating
                 if not calibrating:
                     processor.set_calibration(cal_edit)
@@ -275,6 +295,8 @@ def run(cfg: AppConfig) -> int:
         for th in (capture, inference):
             if th is not None and th.is_alive():
                 th.join(timeout=2.0)
+        if overlay is not None:
+            overlay.close()
         if tracker is not None:
             tracker.close()
         if logger:

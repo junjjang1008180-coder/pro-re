@@ -159,3 +159,55 @@ def test_left_and_right_pinch_not_confused():
     d.frames(4, thumb=P(INDEX.x - 2, INDEX.y - 2), middle=P(INDEX.x - 15, INDEX.y - 5))
     d.frames(3)
     assert d.actions() == [MouseAction.LEFT_CLICK]
+
+
+# ---------------------------------------------------------------- 마우스 모드 (가리키기 자세)
+from vkeyboard.calibration import Calibration  # noqa: E402
+from vkeyboard.gesture_controller import MouseModeDetector, is_pointing  # noqa: E402
+from vkeyboard.input_processor import InputProcessor  # noqa: E402
+from vkeyboard.simulation import open_palm_hand, pointing_hand, typing_hand  # noqa: E402
+
+
+def _typing_right():
+    tips = {"thumb": P(820, 600), "index": P(760, 520), "middle": P(800, 520), "ring": P(840, 520),
+            "pinky": P(880, 520)}
+    return typing_hand("Right", tips, {})
+
+
+def test_pointing_pose_detection():
+    assert is_pointing(pointing_hand("Right", 880, 600).landmarks)
+    assert not is_pointing(open_palm_hand("Right", 880, 600).landmarks)   # 손바닥 펼침
+    assert not is_pointing(_typing_right().landmarks)                      # 타이핑 자세
+
+
+def test_mouse_mode_enter_and_exit_with_hysteresis():
+    m = MouseModeDetector(enter_time=0.25, exit_time=0.4)
+    point, typing = pointing_hand("Right", 880, 600), _typing_right()
+    assert m.update(point, 0.0) is False
+    assert m.update(point, 0.1) is False
+    assert m.update(point, 0.3) is True               # 0.25초 유지 -> 마우스 모드
+    assert m.update(typing, 0.4) is True              # 잠깐 풀어도 유지
+    assert m.update(point, 0.5) is True
+    assert m.update(typing, 0.6) is True
+    assert m.update(typing, 1.05) is False            # 0.4초 넘게 풀면 타이핑 모드
+
+
+def test_processor_mouse_mode_independent_of_keyboard_position(cfg):
+    """키보드를 화면 위쪽 전체에 둬도 가리키기 자세면 마우스가 동작하고, 오른손은 키를 치지 않는다."""
+    p = InputProcessor(cfg, Calibration(100, 150, 1080, 400), (1920, 1080))
+    p.gesture.set_active(True)
+    left = open_palm_hand("Left", 300, 650)
+    events, t = [], 0.0
+    for _ in range(12):
+        snap, ev = p.process([left, pointing_hand("Right", 880, 600)], t)
+        events += ev
+        t += 1 / 30
+    assert snap.mouse_mode and not snap.mouse.suspended
+    assert any(getattr(e, "action", None) is MouseAction.MOVE for e in events)
+    assert all(snap.finger_views[f].reason == "mouse" for f in snap.finger_views if f.hand == "Right")
+    assert not any(hasattr(e, "key") and e.finger.hand == "Right" for e in events)
+
+
+def test_default_keyboard_is_raised():
+    c = Calibration.default()
+    assert c.y + c.height < 720 * 0.85            # 화면 맨 아래에 붙지 않음

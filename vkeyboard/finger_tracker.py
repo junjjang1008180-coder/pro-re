@@ -4,7 +4,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import Dict, List, Optional, Sequence
 
-from .config import (HAND_SIZE_SMOOTHING, OUTLIER_RESET_FRAMES, TRACKING_GAP_RESET,
+from .config import (HAND_SIZE_SMOOTHING, OUTLIER_RESET_FRAMES, PRESS_SMOOTHING_FRAMES, TRACKING_GAP_RESET,
                      AppConfig, hand_scale)
 from .geometry import (HandObservation, INDEX_MCP, INDEX_TIP, MIDDLE_MCP, MIDDLE_TIP, PINKY_MCP,
                        PINKY_TIP, RING_MCP, RING_TIP, THUMB_MCP, THUMB_TIP, Vec2, hand_size)
@@ -65,7 +65,9 @@ class FingerTracker:
     def __init__(self, cfg: AppConfig) -> None:
         self.cfg = cfg
         self._tip_avg = {f: MovingAverage(cfg.smoothing_frames) for f in FINGER_ORDER}
-        self._rel_avg = {f: ScalarMovingAverage(cfg.smoothing_frames) for f in FINGER_ORDER}
+        # 위치(어느 키 위인지)는 강하게, 누름 깊이는 약하게 평균: 짧은 누름도 살아남도록
+        self._rel_avg = {f: ScalarMovingAverage(min(cfg.smoothing_frames, PRESS_SMOOTHING_FRAMES))
+                         for f in FINGER_ORDER}
         self._gates = {f: PointGate(cfg.max_allowed_jump, cfg.max_speed, OUTLIER_RESET_FRAMES,
                                     TRACKING_GAP_RESET) for f in FINGER_ORDER}
         self._hand_size: Dict[str, float] = {}

@@ -46,6 +46,7 @@ class FingerStateMachine:
         self.released_at = 0.0
         self.suppressed = 0            # 쿨다운 때문에 무시된 누름 수
         self.needs_rebaseline = False  # 느린 드리프트로 취소됨 -> 기준선 재설정 필요
+        self._min_frames = params.min_down_frames
 
     def reset(self) -> None:
         self.state = FingerState.HOVER
@@ -53,9 +54,14 @@ class FingerStateMachine:
 
     def update(self, dy: float, t: float, valid: bool = True,
                press_threshold: Optional[float] = None,
-               release_threshold: Optional[float] = None) -> bool:
-        """한 프레임 갱신. 이번 프레임에 키 입력이 확정되면 True."""
+               release_threshold: Optional[float] = None,
+               min_down_frames: Optional[int] = None) -> bool:
+        """한 프레임 갱신. 이번 프레임에 키 입력이 확정되면 True.
+
+        min_down_frames 를 주면 이번 프레임에 한해 필요 프레임 수를 바꾼다(FPS 보정).
+        """
         self.needs_rebaseline = False
+        self._min_frames = self.params.min_down_frames if min_down_frames is None else min_down_frames
         press_th = self.params.press_distance if press_threshold is None else press_threshold
         release_th = self.params.release_distance if release_threshold is None else release_threshold
 
@@ -98,7 +104,7 @@ class FingerStateMachine:
         return False
 
     def _maybe_confirm(self, t: float) -> bool:
-        if self.down_frames < self.params.min_down_frames:
+        if self.down_frames < self._min_frames:
             return False
         self.state = FingerState.PRESSED
         if t - self.last_fire_time >= self.params.cooldown:

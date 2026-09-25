@@ -82,6 +82,19 @@ def open_palm_hand(label: str, cx: float, wrist_y: float, confidence: float = 0.
     return HandObservation(label, lm, confidence)  # type: ignore[arg-type]
 
 
+def pointing_hand(label: str, cx: float, wrist_y: float, thumb: Optional[Vec2] = None,
+                  confidence: float = 0.95) -> HandObservation:
+    """마우스 모드 자세: 검지를 위로 펴고 약지·새끼를 접은 손. thumb 을 주면 엄지 끝 위치(핀치)."""
+    lm = list(open_palm_hand(label, cx, wrist_y, confidence).landmarks)
+    for digit in ("ring", "pinky"):
+        base = _BASES[digit]
+        mcp = lm[base]
+        lm[base + 1], lm[base + 2], lm[base + 3] = mcp + Vec2(0, -18), mcp + Vec2(0, -8), mcp + Vec2(0, 15)
+    if thumb is not None:
+        lm[4] = thumb
+    return HandObservation(label, lm, confidence)  # type: ignore[arg-type]
+
+
 @dataclass
 class SimulationReport:
     typed_text: str
@@ -104,7 +117,7 @@ class HandSimulator:
         self.offset = {"Left": Vec2(0, 0), "Right": Vec2(0, 0)}
         self.press: Dict[str, Dict[str, float]] = {"Left": {}, "Right": {}}
         self.thumb_override: Dict[str, Optional[Vec2]] = {"Left": None, "Right": None}
-        self.pose = "typing"          # typing | open | none
+        self.pose = "typing"          # typing | open | point(오른손 마우스) | none
         self.events: list = []
         self._home = {lab: home_tips(self.layout, lab) for lab in ("Left", "Right")}
 
@@ -113,6 +126,10 @@ class HandSimulator:
             return []
         if self.pose == "open":
             return [open_palm_hand("Left", 400, 600), open_palm_hand("Right", 880, 600)]
+        if self.pose == "point":
+            left_tips = {d: p + self.offset["Left"] for d, p in self._home["Left"].items()}
+            return [typing_hand("Left", left_tips, {}),
+                    pointing_hand("Right", 880, 600, self.thumb_override["Right"])]
         hands = []
         for lab in ("Left", "Right"):
             tips = {d: p + self.offset[lab] for d, p in self._home[lab].items()}
@@ -189,14 +206,16 @@ def run_simulation(cfg: AppConfig, sentences: Sequence[str] = DEFAULT_SENTENCES,
         sim.type_text(sentence, set(mistakes))
         sim.step(5)
 
-    # 3) 마우스: 오른손을 키보드 위쪽으로 올리고 엄지-검지 핀치로 좌클릭
-    sim.move_hand("Right", Vec2(40, -330))
-    sim.step(8)
-    index_tip = sim._home["Right"]["index"] + sim.offset["Right"]
+    # 3) 마우스: 오른손 가리키기 자세(마우스 모드) -> 엄지-검지 핀치로 좌클릭 -> 손 펴서 타이핑 모드 복귀
+    sim.pose = "point"
+    sim.step(12)
+    index_tip = pointing_hand("Right", 880, 600).landmarks[8]
     sim.thumb_override["Right"] = index_tip + Vec2(6, 2)
     sim.step(4)
     sim.thumb_override["Right"] = None
     sim.step(6)
+    sim.pose = "typing"
+    sim.step(15)
 
     # 4) 손 추적 실패 -> 강제 INACTIVE
     sim.pose = "none"

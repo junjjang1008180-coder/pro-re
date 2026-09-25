@@ -60,6 +60,9 @@ FINGER_OVERLAP_DISTANCE = 12.0   # 손가락 끝끼리 이보다 가까우면 �
 OUTLIER_RESET_FRAMES = 4         # 연속 이상치 N회면 새 위치로 재동기화
 TRACKING_GAP_RESET = 0.25        # 이 시간(초) 이상 관측이 끊기면 필터 초기화
 
+PRESS_SMOOTHING_FRAMES = 2       # 누름 깊이(dy) 신호는 가볍게만 평균 -> 짧은 '톡' 누름이 뭉개지지 않게
+MIN_DOWN_TIME = 0.08             # 임계값 통과 유지 최소 시간(초). 저 FPS 카메라에서는 필요 프레임 수를 줄여 줌
+KEY_SNAP_RADIUS = 0.6            # 손끝이 담당 키 밖이어도 키 중심에서 이 거리(키 1칸 대비) 안이면 그 키로 인정
 PRESS_MAX_DURATION = 0.6         # PRESSING 상태로 이 시간 안에 확정 못 하면 취소(느린 드리프트)
 BASELINE_ALPHA = 0.15            # HOVER 중 기준선(손가락 휴지 위치) 적응 속도
 RELEASED_HOLD_TIME = 0.15        # RELEASED 상태 표시 유지 시간
@@ -74,7 +77,7 @@ PINCH_MIN_FRAMES = 2             # 핀치가 N프레임 연속 유지돼야 인�
 CLICK_MAX_DURATION = 0.6         # 이보다 오래 붙이고 있으면 클릭이 아님
 DRAG_START_DISTANCE = 25.0       # 핀치 상태에서 이만큼 이동하면 드래그 시작
 DOUBLE_CLICK_MIN_INTERVAL = 0.06 # 더블클릭 두 번째 클릭 최소 간격(디바운스)
-MOUSE_REGION = (0.10, 0.05, 0.90, 0.55)  # 추론 프레임 정규화 좌표 (x0, y0, x1, y1) -> 화면 전체로 매핑
+MOUSE_REGION = (0.15, 0.10, 0.85, 0.70)  # 추론 프레임 정규화 좌표 (x0, y0, x1, y1) -> 화면 전체로 매핑
 ONE_EURO_MIN_CUTOFF = 1.2
 ONE_EURO_BETA = 0.02
 
@@ -111,6 +114,10 @@ class AppConfig:
     model_path: str = DEFAULT_MODEL_PATH
     simulate: bool = False
     beep: bool = False
+    overlay: bool = True              # 바탕화면에 항상 위 HUD(미니 키보드/마우스/상태) 표시
+    overlay_corner: str = "br"        # br | bl | tr | tl
+    overlay_scale: float = 1.3
+    sensitivity: str = "normal"       # low | normal | high (키 누름 민감도 프리셋)
     handedness: str = "position"      # position: 화면 위치로 좌/우 손 판별 | model: MediaPipe 라벨 사용
     run_seconds: float = 0.0          # >0 이면 N초 후 자동 정상 종료 (자동 점검/데모용)
 
@@ -141,6 +148,14 @@ class AppConfig:
         연습 모드와 시뮬레이션은 항상 로컬 채점만 하므로 실제 입력을 보내지 않는다.
         """
         return (not self.test_mode) and self.enable_real_input and not self.practice and not self.simulate
+
+
+# 민감도 프리셋: (PRESS_DISTANCE, RELEASE_DISTANCE, MIN_DOWN_FRAMES)
+SENSITIVITY_PRESETS = {
+    "low": (22.0, 12.0, 3),       # 오입력 최소화 (살짝 깊게 눌러야 함)
+    "normal": (PRESS_DISTANCE, RELEASE_DISTANCE, MIN_DOWN_FRAMES),
+    "high": (13.0, 7.0, 2),       # 얕고 빠른 누름도 인식 (오입력 조금 증가)
+}
 
 
 def hand_scale(hand_size: float, reference: float = REFERENCE_HAND_SIZE) -> float:

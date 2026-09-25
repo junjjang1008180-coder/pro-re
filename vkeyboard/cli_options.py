@@ -5,7 +5,7 @@ import argparse
 from dataclasses import replace
 from typing import Optional, Sequence
 
-from .config import AppConfig
+from .config import SENSITIVITY_PRESETS, AppConfig
 
 
 def parse_bool(value: str) -> bool:
@@ -40,14 +40,21 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--simulate", action="store_true",
                    help="웹캠 없이 합성 손 데이터로 판정 파이프라인/연습 채점을 검증 (헤드리스)")
     p.add_argument("--beep", action="store_true", help="키 확정 시 OS 기본 비프음 재생")
+    p.add_argument("--overlay", type=parse_bool, default=d.overlay, metavar="{true,false}",
+                   help="바탕화면에 항상 위 HUD(미니 키보드/마우스/ACTIVE/한영) 표시")
+    p.add_argument("--overlay-corner", choices=("br", "bl", "tr", "tl"), default=d.overlay_corner,
+                   help="HUD 위치: br=오른쪽 아래, bl=왼쪽 아래, tr=오른쪽 위, tl=왼쪽 위")
+    p.add_argument("--overlay-scale", type=float, default=d.overlay_scale, help="HUD 크기 배율")
+    p.add_argument("--sensitivity", choices=("low", "normal", "high"), default=d.sensitivity,
+                   help="키 누름 민감도: high=얕고 빠른 누름도 인식, low=오입력 최소화")
     p.add_argument("--handedness", choices=("position", "model"), default=d.handedness,
                    help="좌/우 손 판별: position=화면 위치(손등이 보여도 안정적), model=MediaPipe 라벨")
     p.add_argument("--run-seconds", type=float, default=d.run_seconds,
                    help="0보다 크면 N초 후 자동 종료 (자동 점검용)")
     # 튜닝 값 (재컴파일 없이 실험용)
-    p.add_argument("--press-distance", type=float, default=d.press_distance)
-    p.add_argument("--release-distance", type=float, default=d.release_distance)
-    p.add_argument("--min-down-frames", type=int, default=d.min_down_frames)
+    p.add_argument("--press-distance", type=float, default=None, help="직접 지정 시 --sensitivity 보다 우선")
+    p.add_argument("--release-distance", type=float, default=None)
+    p.add_argument("--min-down-frames", type=int, default=None)
     p.add_argument("--key-cooldown", type=float, default=d.key_cooldown)
     return p
 
@@ -57,6 +64,13 @@ def parse_cli(argv: Optional[Sequence[str]] = None) -> AppConfig:
     args = build_parser().parse_args(argv)
     if args.capture_width <= 0 or args.capture_height <= 0:
         raise SystemExit("캡처 해상도는 양수여야 합니다")
+    preset_press, preset_release, preset_frames = SENSITIVITY_PRESETS[args.sensitivity]
+    if args.press_distance is None:
+        args.press_distance = preset_press
+    if args.release_distance is None:
+        args.release_distance = preset_release
+    if args.min_down_frames is None:
+        args.min_down_frames = preset_frames
     if args.release_distance >= args.press_distance:
         raise SystemExit("--release-distance 는 --press-distance 보다 작아야 합니다")
     return replace(
@@ -73,6 +87,10 @@ def parse_cli(argv: Optional[Sequence[str]] = None) -> AppConfig:
         model_path=args.model_path,
         simulate=args.simulate,
         beep=args.beep,
+        overlay=args.overlay,
+        overlay_corner=args.overlay_corner,
+        overlay_scale=args.overlay_scale,
+        sensitivity=args.sensitivity,
         handedness=args.handedness,
         run_seconds=args.run_seconds,
         press_distance=args.press_distance,
