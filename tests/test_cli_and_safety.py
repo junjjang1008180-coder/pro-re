@@ -1,0 +1,178 @@
+"""CLI 오버라이드 / 테스트 모드·실제 입력 안전장치 / ACTIVE 전환 제스처."""
+import pytest
+from conftest import P
+
+from vkeyboard.cli_options import parse_bool, parse_cli
+from vkeyboard.config import AppConfig
+from vkeyboard.events import KeyEvent, ModeEvent, MouseAction, MouseEvent
+from vkeyboard.gesture_controller import GestureController, is_palm_open
+from vkeyboard.input_backend import InputDispatcher, MouseButton, RecordingInputBackend
+from vkeyboard.input_processor import InputProcessor
+from vkeyboard.calibration import Calibration
+from vkeyboard.keyboard_layout import Finger, KeyCode
+from vkeyboard.simulation import open_palm_hand, typing_hand
+
+# ---------------------------------------------------------------- CLI
+
+
+def test_defaults_without_arguments():
+    cfg = parse_cli([])
+    assert cfg == AppConfig()
+    assert (cfg.camera_index, cfg.capture_width, cfg.capture_height) == (0, 3840, 2160)
+    assert cfg.test_mode is True and cfg.enable_real_input is False
+    assert cfg.calibration_file == "calibration.json"
+    assert cfg.log_input is None and cfg.practice is False
+
+
+def test_overrides():
+    cfg = parse_cli(["--camera-index", "2", "--capture-width", "1920", "--capture-height", "1080",
+                     "--test-mode", "false", "--enable-real-input", "true",
+                     "--calibration-file", "my.json", "--log-input", "log.csv", "--practice"])
+    assert (cfg.camera_index, cfg.capture_width, cfg.capture_height) == (2, 1920, 1080)
+    assert cfg.test_mode is False and cfg.enable_real_input is True
+    assert cfg.calibration_file == "my.json" and cfg.log_input == "log.csv" and cfg.practice
+
+
+@pytest.mark.parametrize("value, expected", [("true", True), ("False", False), ("1", True), ("no", False)])
+def test_parse_bool(value, expected):
+    assert parse_bool(value) is expected
+
+
+def test_invalid_bool_is_rejected():
+    with pytest.raises(SystemExit):
+        parse_cli(["--test-mode", "maybe"])
+
+
+@pytest.mark.parametrize("args, allowed", [
+    ([], False),
+    (["--test-mode", "false"], False),
+    (["--enable-real-input", "true"], False),
+    (["--test-mode", "false", "--enable-real-input", "true"], True),
+    (["--test-mode", "false", "--enable-real-input", "true", "--practice"], False),
+    (["--test-mode", "false", "--enable-real-input", "true", "--simulate"], False),
+])
+def test_real_input_requires_both_flags(args, allowed):
+    assert parse_cli(args).real_input_allowed is allowed
+
+
+# ---------------------------------------------------------------- Dispatcher 안전장치
+
+KEY = KeyEvent(Finger.LEFT_INDEX, KeyCode.F, 0.0, 20.0, 180.0, 0.9)
+
+
+def test_test_mode_never_calls_backend():
+    b = RecordingInputBackend()
+    d = InputDispatcher(b, real_input_allowed=False)
+    d.set_active(True)
+    d.handle_key(KEY)
+    d.handle_mouse(MouseEvent(MouseAction.LEFT_CLICK, 10, 10, 0.0))
+    assert b.calls == []
+    assert d.last_key_text == "F"                     # 화면 표시는 됨
+
+
+def test_inactive_never_calls_backend():
+    b = RecordingInputBackend()
+    d = InputDispatcher(b, real_input_allowed=True)
+    d.handle_key(KEY)
+    assert b.calls == []
+
+
+def test_real_input_when_allowed_and_active():
+    b = RecordingInputBackend()
+    d = InputDispatcher(b, real_input_allowed=True)
+    d.set_active(True)
+    d.handle_key(KEY)
+    assert b.calls == [("key_down", KeyCode.F), ("key_up", KeyCode.F)]
+
+
+def test_shift_is_one_shot_modifier():
+    b = RecordingInputBackend()
+    d = InputDispatcher(b, True)
+    d.set_active(True)
+    d.handle_key(KeyEvent(Finger.LEFT_PINKY, KeyCode.LEFT_SHIFT, 0, 20, 180, 0.9))
+    d.handle_key(KEY)
+    d.handle_key(KEY)
+    assert b.calls == [("key_down", KeyCode.LEFT_SHIFT), ("key_down", KeyCode.F), ("key_up", KeyCode.F),
+                       ("key_up", KeyCode.LEFT_SHIFT), ("key_down", KeyCode.F), ("key_up", KeyCode.F)]
+
+
+def test_emergency_stop_releases_drag_and_blocks_input():
+    b = RecordingInputBackend()
+    d = InputDispatcher(b, True)
+    d.set_active(True)
+    d.handle_mouse(MouseEvent(MouseAction.DRAG_START, 5, 5, 0.0))
+    assert ("button", MouseButton.LEFT, True) in b.calls
+    d.emergency_stop("웹캠 연결 실패")
+    assert b.calls[-1] == ("button", MouseButton.LEFT, False)
+    n = len(b.calls)
+    d.handle_key(KEY)
+    assert len(b.calls) == n and d.stopped
+
+
+def test_going_inactive_releases_held_buttons():
+    b = RecordingInputBackend()
+    d = InputDispatcher(b, True)
+    d.set_active(True)
+    d.handle_mouse(MouseEvent(MouseAction.DRAG_START, 5, 5, 0.0))
+    d.set_active(False)
+    assert b.calls[-1] == ("button", MouseButton.LEFT, False)
+
+
+# ---------------------------------------------------------------- ACTIVE / INACTIVE 전환
+
+def _typing(label):
+    x = 500 if label == "Left" else 800
+    tips = {"thumb": P(x + 20, 600), "index": P(x + 40, 520), "middle": P(x, 520), "ring": P(x - 40, 520),
+            "pinky": P(x - 80, 520)}
+    return typing_hand(label, tips, {})
+
+
+def test_palm_open_detection():
+    assert is_palm_open(open_palm_hand("Left", 400, 600).landmarks)
+    assert is_palm_open(open_palm_hand("Right", 880, 600).landmarks)
+    assert not is_palm_open(_typing("Left").landmarks)
+
+
+def test_starts_inactive_and_toggles_after_one_second():
+    g = GestureController(1.0)
+    assert g.active is False
+    hands = [open_palm_hand("Left", 400, 600), open_palm_hand("Right", 880, 600)]
+    results = [g.update(hands, i / 30) for i in range(29)]
+    assert all(r is None for r in results) and not g.active          # 1초 미만
+    assert g.update(hands, 1.0) is True and g.active
+
+
+def test_toggle_requires_both_hands():
+    g = GestureController(1.0)
+    one = [open_palm_hand("Left", 400, 600), _typing("Right")]
+    assert all(g.update(one, i / 30) is None for i in range(60))
+
+
+def test_toggle_requires_lowering_hands_before_next_toggle():
+    g = GestureController(1.0)
+    hands = [open_palm_hand("Left", 400, 600), open_palm_hand("Right", 880, 600)]
+    t = 0.0
+    while g.update(hands, t) is None:
+        t += 1 / 30
+    assert g.active
+    assert all(g.update(hands, t + i / 30) is None for i in range(1, 90))   # 계속 펴고 있어도 재전환 없음
+    g.update([], t + 3.1)
+    t2 = t + 3.2
+    while g.update(hands, t2) is None:
+        t2 += 1 / 30
+    assert not g.active
+
+
+def test_processor_forces_inactive_on_tracking_loss(cfg):
+    p = InputProcessor(cfg, Calibration.default(), (1920, 1080))
+    hands = [open_palm_hand("Left", 400, 600), open_palm_hand("Right", 880, 600)]
+    events, t = [], 0.0
+    for _ in range(40):
+        events += p.process(hands, t)[1]
+        t += 1 / 30
+    assert any(isinstance(e, ModeEvent) and e.active for e in events)
+    for _ in range(30):
+        events += p.process([], t)[1]
+        t += 1 / 30
+    lost = [e for e in events if isinstance(e, ModeEvent) and not e.active]
+    assert lost and lost[0].reason == "tracking_lost"
