@@ -47,6 +47,7 @@ def open_camera(index: int, width: int, height: int):
     # 4K 등 고해상도는 MJPG 가 아니면 30fps 가 안 나오는 카메라가 많다
     cap.set(cv2.CAP_PROP_FOURCC, cv2.VideoWriter_fourcc(*"MJPG"))
     cap.set(cv2.CAP_PROP_BUFFERSIZE, 1)
+    cap.set(cv2.CAP_PROP_FPS, 30)
 
     candidates = [(width, height)] + [r for r in FALLBACK_RESOLUTIONS
                                       if r[0] * r[1] < width * height and r != (width, height)]

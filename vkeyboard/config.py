@@ -111,6 +111,7 @@ class AppConfig:
     model_path: str = DEFAULT_MODEL_PATH
     simulate: bool = False
     beep: bool = False
+    handedness: str = "position"      # position: 화면 위치로 좌/우 손 판별 | model: MediaPipe 라벨 사용
     run_seconds: float = 0.0          # >0 이면 N초 후 자동 정상 종료 (자동 점검/데모용)
 
     press_distance: float = PRESS_DISTANCE
