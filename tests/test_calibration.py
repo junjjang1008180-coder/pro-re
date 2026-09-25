@@ -173,3 +173,19 @@ def test_duplicate_handedness_is_resolved_by_position():
     hands = normalize_handedness([b, a])
     assert [h.handedness for h in hands] == ["Left", "Right"]
     assert hands[0].landmarks[0].x < hands[1].landmarks[0].x
+
+
+def test_position_handedness_ignores_flipped_model_labels():
+    """손등이 보이면 MediaPipe 좌우가 뒤집힌다 -> 위치 기준 모드는 화면 위치로 판별."""
+    from vkeyboard.finger_tracker import normalize_handedness
+
+    left_side = HandObservation("Right", _hand().landmarks, 0.9)              # 화면 왼쪽인데 Right 라벨
+    right_side = HandObservation("Left", _hand(offset_x=300).landmarks, 0.9)  # 화면 오른쪽인데 Left 라벨
+    hands = normalize_handedness([right_side, left_side], split_x=640)
+    assert [h.handedness for h in hands] == ["Left", "Right"]
+    assert hands[0].landmarks[0].x < hands[1].landmarks[0].x
+    # 한 손만 있으면 키보드 중앙(split_x) 기준
+    assert normalize_handedness([right_side], split_x=640)[0].handedness == "Right"
+    assert normalize_handedness([left_side], split_x=640)[0].handedness == "Left"
+    # model 모드(split_x 없음)는 라벨 유지
+    assert normalize_handedness([right_side])[0].handedness == "Left"

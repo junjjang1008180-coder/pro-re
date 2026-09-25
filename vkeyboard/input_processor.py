@@ -66,7 +66,8 @@ class InputProcessor:
 
     def process(self, hands: Sequence[HandObservation], t: float) -> Tuple[Snapshot, list]:
         self._apply_pending()
-        hands = normalize_handedness(hands)
+        split_x = self.layout.x + self.layout.width / 2 if self.cfg.handedness == "position" else None
+        hands = normalize_handedness(hands, split_x)
         events: list = []
 
         toggled = self.gesture.update(hands, t)

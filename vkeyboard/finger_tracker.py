@@ -35,14 +35,29 @@ class FingerSample:
     resynced: bool = False             # 필터가 새 위치로 재동기화됨 -> 누름 기준선도 다시 잡아야 함
 
 
-def normalize_handedness(hands: Sequence[HandObservation]) -> List[HandObservation]:
-    """최대 2손. 두 손이 같은 쪽으로 라벨링되면 화면 x 위치로 좌/우를 다시 정한다."""
+def _center_x(hand: HandObservation) -> float:
+    return sum(p.x for p in hand.landmarks) / len(hand.landmarks)
+
+
+def normalize_handedness(hands: Sequence[HandObservation],
+                         split_x: Optional[float] = None) -> List[HandObservation]:
+    """최대 2손의 좌/우 라벨을 정리한다.
+
+    split_x 가 없으면 MediaPipe 라벨을 쓰되, 두 손이 같은 쪽으로 나오면 화면 x 위치로 나눈다.
+    split_x 가 있으면(위치 기준 모드) 라벨을 무시하고 화면 위치로 정한다:
+    두 손이면 왼쪽 손 = Left, 한 손이면 split_x(키보드 중앙) 왼쪽 = Left.
+    MediaPipe 는 손바닥 기준으로 좌우를 판별하므로, 타이핑 자세처럼 손등이 카메라를 향하면
+    좌우가 뒤집혀 나온다 -> 가상 키보드에서는 위치 기준이 더 안정적이다.
+    """
     hands = [h for h in hands if len(h.landmarks) >= 21]
     hands = sorted(hands, key=lambda h: h.confidence, reverse=True)[:2]
-    if len(hands) == 2 and hands[0].handedness == hands[1].handedness:
-        a, b = sorted(hands, key=lambda h: h.landmarks[0].x)
-        hands = [HandObservation("Left", a.landmarks, a.confidence),
-                 HandObservation("Right", b.landmarks, b.confidence)]
+    if len(hands) == 2 and (split_x is not None or hands[0].handedness == hands[1].handedness):
+        a, b = sorted(hands, key=_center_x)
+        return [HandObservation("Left", a.landmarks, a.confidence),
+                HandObservation("Right", b.landmarks, b.confidence)]
+    if len(hands) == 1 and split_x is not None:
+        h = hands[0]
+        return [HandObservation("Left" if _center_x(h) < split_x else "Right", h.landmarks, h.confidence)]
     return hands
 
 

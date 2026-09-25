@@ -40,6 +40,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--simulate", action="store_true",
                    help="웹캠 없이 합성 손 데이터로 판정 파이프라인/연습 채점을 검증 (헤드리스)")
     p.add_argument("--beep", action="store_true", help="키 확정 시 OS 기본 비프음 재생")
+    p.add_argument("--handedness", choices=("position", "model"), default=d.handedness,
+                   help="좌/우 손 판별: position=화면 위치(손등이 보여도 안정적), model=MediaPipe 라벨")
     p.add_argument("--run-seconds", type=float, default=d.run_seconds,
                    help="0보다 크면 N초 후 자동 종료 (자동 점검용)")
     # 튜닝 값 (재컴파일 없이 실험용)
@@ -71,6 +73,7 @@ def parse_cli(argv: Optional[Sequence[str]] = None) -> AppConfig:
         model_path=args.model_path,
         simulate=args.simulate,
         beep=args.beep,
+        handedness=args.handedness,
         run_seconds=args.run_seconds,
         press_distance=args.press_distance,
         release_distance=args.release_distance,
