@@ -47,6 +47,8 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--overlay-scale", type=float, default=d.overlay_scale, help="HUD 크기 배율")
     p.add_argument("--sensitivity", choices=("low", "normal", "high"), default=d.sensitivity,
                    help="키 누름 민감도: high=얕고 빠른 누름도 인식, low=오입력 최소화")
+    p.add_argument("--mouse-exclusive", type=parse_bool, default=d.mouse_exclusive, metavar="{true,false}",
+                   help="마우스 모드 중 키보드 입력을 모두 멈춤 (false 면 왼손은 계속 타이핑 가능)")
     p.add_argument("--handedness", choices=("position", "model"), default=d.handedness,
                    help="좌/우 손 판별: position=화면 위치(손등이 보여도 안정적), model=MediaPipe 라벨")
     p.add_argument("--run-seconds", type=float, default=d.run_seconds,
@@ -71,8 +73,16 @@ def parse_cli(argv: Optional[Sequence[str]] = None) -> AppConfig:
         args.release_distance = preset_release
     if args.min_down_frames is None:
         args.min_down_frames = preset_frames
+    if args.press_distance <= 0 or args.release_distance < 0:
+        raise SystemExit("--press-distance 는 0 보다 커야 하고 --release-distance 는 0 이상이어야 합니다")
     if args.release_distance >= args.press_distance:
         raise SystemExit("--release-distance 는 --press-distance 보다 작아야 합니다")
+    if args.min_down_frames < 1:
+        raise SystemExit("--min-down-frames 는 1 이상이어야 합니다")
+    if args.key_cooldown < 0:
+        raise SystemExit("--key-cooldown 은 0 이상이어야 합니다")
+    if not 0.5 <= args.overlay_scale <= 3.0:
+        raise SystemExit("--overlay-scale 은 0.5 ~ 3.0 사이여야 합니다")
     return replace(
         AppConfig(),
         camera_index=args.camera_index,
@@ -91,6 +101,7 @@ def parse_cli(argv: Optional[Sequence[str]] = None) -> AppConfig:
         overlay_corner=args.overlay_corner,
         overlay_scale=args.overlay_scale,
         sensitivity=args.sensitivity,
+        mouse_exclusive=args.mouse_exclusive,
         handedness=args.handedness,
         run_seconds=args.run_seconds,
         press_distance=args.press_distance,

@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from dataclasses import asdict, dataclass, replace
 from typing import Optional
@@ -75,16 +76,23 @@ class Calibration:
 
     @classmethod
     def from_dict(cls, d: dict) -> "Calibration":
-        return cls(float(d["x"]), float(d["y"]), float(d["width"]), float(d["height"]),
-                   int(d.get("infer_width", INFER_WIDTH)), int(d.get("infer_height", INFER_HEIGHT)))
+        vals = [float(d[k]) for k in ("x", "y", "width", "height")]
+        iw, ih = int(d.get("infer_width", INFER_WIDTH)), int(d.get("infer_height", INFER_HEIGHT))
+        if not all(math.isfinite(v) for v in vals) or vals[2] <= 0 or vals[3] <= 0 or iw <= 0 or ih <= 0:
+            raise ValueError("캘리브레이션 값이 올바르지 않습니다")
+        return cls(*vals, iw, ih)
 
     def save(self, path: str) -> None:
         folder = os.path.dirname(os.path.abspath(path))
         os.makedirs(folder, exist_ok=True)
         tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            json.dump(self.to_dict(), f, indent=2)
-        os.replace(tmp, path)
+        try:
+            with open(tmp, "w", encoding="utf-8") as f:
+                json.dump(self.to_dict(), f, indent=2)
+            os.replace(tmp, path)
+        finally:
+            if os.path.exists(tmp):
+                os.remove(tmp)
 
     @classmethod
     def load(cls, path: str, infer_width: int = INFER_WIDTH,

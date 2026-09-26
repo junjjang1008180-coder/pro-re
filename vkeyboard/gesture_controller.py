@@ -44,10 +44,10 @@ def is_palm_open(landmarks: Sequence[Vec2]) -> bool:
     return True
 
 
-POINT_UP_RATIO = 0.5      # 검지 끝이 검지 MCP 보다 손바닥 길이의 이 비율 이상 위
+POINT_UP_RATIO = 0.25     # 검지 끝이 검지 MCP 보다 손바닥 길이의 이 비율 이상 위 (카메라 쪽을 가리켜도 인식되게 완화)
 FOLD_RATIO = 1.05         # 손목~손끝 < 손목~PIP * 이 값 이면 접힌 손가락
 MOUSE_ENTER_TIME = 0.25   # 가리키기 자세를 이만큼 유지하면 마우스 모드
-MOUSE_EXIT_TIME = 0.4     # 자세를 풀고 이만큼 지나면 타이핑 모드
+MOUSE_EXIT_TIME = 0.4     # 약지·새끼를 펴고 이만큼 지나면 타이핑 모드
 
 
 def is_pointing(landmarks: Sequence[Vec2]) -> bool:
@@ -73,30 +73,82 @@ def is_pointing(landmarks: Sequence[Vec2]) -> bool:
     return True
 
 
-class MouseModeDetector:
-    """오른손 가리키기 자세로 마우스 모드 on/off (히스테리시스로 깜빡임 방지)."""
+def is_mouse_hold(landmarks: Sequence[Vec2]) -> bool:
+    """마우스 모드 유지 조건: 약지·새끼가 접혀 있음.
 
-    def __init__(self, enter_time: float = MOUSE_ENTER_TIME, exit_time: float = MOUSE_EXIT_TIME) -> None:
+    진입(is_pointing)보다 느슨하다. 클릭하려고 엄지-검지/중지를 붙이면 검지가 굽혀져
+    '가리키기'가 깨지는데, 그때 마우스 모드가 풀려 키 입력으로 새지 않게 하기 위함.
+    약지·새끼를 펴서 타이핑 자세로 돌아가야 해제된다.
+    """
+    if len(landmarks) < 21:
+        return False
+    wrist = landmarks[WRIST]
+    return all(dist(wrist, landmarks[tip_i]) <= dist(wrist, landmarks[pip_i]) * FOLD_RATIO
+               for tip_i, pip_i in ((RING_TIP, RING_PIP), (PINKY_TIP, PINKY_PIP)))
+
+
+class MouseModeDetector:
+    """오른손 자세로 마우스 모드 on/off.
+
+    - 진입: 가리키기 자세(is_pointing)를 enter_time 유지. 자세가 보이는 순간부터 pending=True
+    - 유지: 약지·새끼가 접혀 있는 동안(is_mouse_hold). 클릭 핀치로 검지가 굽혀도 유지
+    - 해제: 약지·새끼를 펴고 exit_time, 또는 손이 lost_time 이상 안 보임
+    """
+
+    def __init__(self, enter_time: float = MOUSE_ENTER_TIME, exit_time: float = MOUSE_EXIT_TIME,
+                 lost_time: float = 0.6) -> None:
         self.enter_time = enter_time
         self.exit_time = exit_time
+        self.lost_time = lost_time
         self.on = False
+        self.pending = False           # 진입 대기 중 (가리키기 자세가 보이지만 아직 확정 전)
+        self.exited_at = float("-inf")
         self._since: Optional[float] = None
+        self._missing_since: Optional[float] = None
+
+    def _exit(self, t: float) -> None:
+        self.on = False
+        self.exited_at = t
+        self._since = None
 
     def update(self, hand: Optional[HandObservation], t: float) -> bool:
-        pointing = hand is not None and is_pointing(hand.landmarks)
-        if pointing == self.on:
-            self._since = None
+        if hand is None:
+            self.pending = False
+            self._since = None if not self.on else self._since
+            if self.on:
+                if self._missing_since is None:
+                    self._missing_since = t
+                if t - self._missing_since >= self.lost_time:
+                    self._exit(t)
             return self.on
-        if self._since is None:
-            self._since = t
-        if t - self._since >= (self.exit_time if self.on else self.enter_time):
-            self.on = pointing
+        self._missing_since = None
+
+        if not self.on:
+            self.pending = is_pointing(hand.landmarks)
+            if not self.pending:
+                self._since = None
+                return False
+            if self._since is None:
+                self._since = t
+            if t - self._since >= self.enter_time:
+                self.on, self.pending, self._since = True, False, None
+            return self.on
+
+        self.pending = False
+        if is_mouse_hold(hand.landmarks):
             self._since = None
+        else:
+            if self._since is None:
+                self._since = t
+            if t - self._since >= self.exit_time:
+                self._exit(t)
         return self.on
 
     def reset(self) -> None:
         self.on = False
+        self.pending = False
         self._since = None
+        self._missing_since = None
 
 
 class GestureController:

@@ -79,3 +79,12 @@ def test_resize_for_inference_outputs_1280x720():
     frame = np.zeros((2160, 3840, 3), dtype=np.uint8)
     small = FrameScaler(3840, 2160).resize_for_inference(frame)
     assert small.shape == (720, 1280, 3)
+
+
+def test_display_size_fits_small_screen():
+    from vkeyboard.pipeline import display_size
+
+    assert display_size(1920, 1080, 1920) == (1920, 1080)
+    assert display_size(3840, 2160, 1920) == (1920, 1080)
+    w, h = display_size(1920, 1080, 1229, 652)               # 1366x768 노트북 (90% / 85%)
+    assert w <= 1229 and h <= 652 and abs(w / h - 16 / 9) < 0.01

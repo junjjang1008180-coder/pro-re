@@ -48,12 +48,24 @@ python main.py --capture-width 1920 --capture-height 1080   # 실제 실행 (기
   연습/시뮬레이션 모드는 절대 실제 입력 금지. 시작 상태는 항상 INACTIVE. `InputBackend` 호출은 메인 스레드에서만.
 - **좌우 손은 화면 위치 기준**(`--handedness position`, 기본). MediaPipe 좌우 라벨은 손등이 보이는 타이핑 자세에서
   뒤집히므로 쓰지 않는다. 같은 이유로 handedness 점수로 손가락을 버리지 않는다.
-- **마우스 모드는 오른손 가리키기 자세**(검지 위, 약지·새끼 접기)로 켠다. 키보드 위치와 무관하게 동작해야 하며,
-  마우스 모드 중 오른손은 키 입력에서 제외하고 누름 기준선을 버린다 (복귀 시 오입력 방지).
+- **마우스 모드는 오른손 가리키기 자세**(검지 펴기, 약지·새끼 접기)로 켜고, **약지·새끼가 접혀 있는 동안 유지**한다
+  (클릭 핀치로 검지가 굽혀도 유지). 키보드 위치와 무관하게 동작해야 한다.
+  마우스와 키보드는 겹치면 안 된다: 마우스 모드 중 양손 키 입력 차단(`--mouse-exclusive`), 가리키기 자세가 보이는 순간
+  오른손 차단, 해제 직후 0.4초 차단. 차단된 손가락은 누름 기준선을 버린다 (복귀 시 오입력 방지).
 - 누름 깊이 = 손끝 y − 해당 손가락 MCP y (손 전체 이동은 누름 아님). 자세가 바뀌거나 추적이 재동기화되면 기준선 재설정.
 - 화면 문구는 영어(Hershey 폰트). 한글은 `mini_ui.unicode_font()`(OpenCV 5 `FontFace` + 시스템 한글 폰트)로만,
   폰트가 없으면 영문 대체 문구로 동작해야 한다.
 - 새 기능에는 pytest 테스트를 추가하고, 가능하면 `simulation.py` 의 합성 손으로 end-to-end 확인.
+
+## 견고성 규칙
+
+- OS 입력 전송 실패, 파일 저장 실패(캘리브레이션/연습 결과/로그)로 **프로그램이 종료되면 안 된다**.
+  `InputDispatcher._safe`, `app._try_save` 를 거친다.
+- MediaPipe 모델은 **바이트로** 넘긴다 (`model_asset_buffer`). Windows 에서 한글 경로를 `model_asset_path` 로
+  넘기면 `Unable to open file` 로 실패한다 (이 PC 경로에 `바탕 화면` 이 있음).
+- 기본 파일 경로(모델, calibration.json, practice_result.json)는 `config.PROJECT_ROOT` 기준.
+- `requirements.txt` 는 `opencv-contrib-python` 만 쓴다 (`opencv-python` 과 동시 설치 시 cv2 충돌).
+- `print` 는 한글을 쓰므로 `main()` 에서 stdout 을 `errors="replace"` 로 재설정한다.
 
 ## 환경 메모 (개발 PC: Windows)
 

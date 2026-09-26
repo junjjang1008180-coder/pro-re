@@ -57,6 +57,7 @@ NMS, 추적 로직을 모두 재구현해야 해서 버그 위험이 큽니다. 
 ## 1. 설치
 
 ### 공통
+**Python 3.10 ~ 3.13** 을 쓰세요 (MediaPipe 가 지원하는 버전).
 ```bash
 python -m venv .venv
 ```
@@ -68,8 +69,15 @@ python -m venv .venv
 pip install -r requirements.txt
 ```
 
+> OpenCV 는 `opencv-contrib-python` 하나만 씁니다 (MediaPipe 가 이 패키지에 의존).
+> `opencv-python` 을 따로 설치하면 두 패키지가 같은 `cv2` 폴더를 덮어써서 `import cv2` 오류가 날 수 있습니다.
+
 손 랜드마크 모델 `models/hand_landmarker.task` (약 7.8MB)는 **첫 실행 때 Google 공식 배포 주소에서 자동 다운로드**됩니다.
 오프라인 환경이면 아래 주소에서 받아 `models/` 에 넣거나 `--model-path` 로 경로를 지정하세요.
+모델은 경로가 아니라 파일 내용을 읽어 넘기므로, 폴더 경로에 한글(예: `바탕 화면`)이 있어도 됩니다.
+
+**파일 위치:** 모델, `calibration.json`, `practice_result.json` 의 기본 위치는 **프로젝트 폴더**입니다.
+다른 폴더에서 `python C:\...\pro-re\main.py` 로 실행해도 같은 파일을 씁니다.
 `https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/latest/hand_landmarker.task`
 
 ### 플랫폼별 실제 입력 준비물
@@ -122,6 +130,7 @@ python main.py
 | `--overlay <true\|false>` | true | 바탕화면에 항상 위 HUD(미니 키보드/마우스/ACTIVE/한영) 표시 |
 | `--overlay-corner <br\|bl\|tr\|tl>` | br | HUD 위치 (오른쪽 아래/왼쪽 아래/오른쪽 위/왼쪽 위) |
 | `--overlay-scale <float>` | 1.3 | HUD 크기 배율 |
+| `--mouse-exclusive <true\|false>` | true | 마우스 모드 중 키보드 입력 전부 멈춤 (false 면 왼손은 계속 타이핑) |
 | `--handedness <position\|model>` | position | 좌/우 손 판별. position=화면 위치 기준(손등이 보여도 안정적), model=MediaPipe 라벨 |
 | `--run-seconds <float>` | 0 | 0보다 크면 N초 후 자동 종료 (자동 점검/데모용) |
 | `--press-distance`, `--release-distance`, `--min-down-frames`, `--key-cooldown` | Config 값 | 튜닝 실험용 오버라이드 |
@@ -160,6 +169,11 @@ python main.py --simulate --practice
 - **손 추적 실패** → 손이 사라지는 즉시 해당 손가락 판정 중단, 0.7초 이상 사라지면 강제 INACTIVE, 드래그 중이던 버튼 해제
 - **창 닫기** → 입력 중지 후 종료
 - **예외 발생** → `try/except/finally` 로 눌린 버튼·키를 모두 떼고 종료 (종료 코드 1)
+- **영상 멈춤** (카메라가 응답 없음) → ACTIVE 중 1초 이상 판정이 안 오면 INACTIVE 전환 + 눌린 버튼 해제
+- **입력 전송 실패** (예: 관리자 권한 창에 포커스) → 경고만 출력하고 프로그램은 계속 동작
+- 가상 키를 실제로 보낸 직후 0.5초 동안은 카메라 창 단축키(`a`, `c` 등)를 무시합니다.
+  카메라 창에 포커스가 있을 때 가상 키보드로 친 `a` 가 ACTIVE 전환으로 오작동하는 것을 막기 위함입니다.
+- `a` 키로 ACTIVE 를 켠 직후 3초 동안은 손이 안 보여도 추적 실패로 꺼지지 않습니다 (손을 카메라 앞으로 가져올 시간).
 - `ESC` → 즉시 종료
 
 화면 좌상단에 `TEST MODE (no real input)` 또는 빨간색 `REAL INPUT ENABLED` 가 항상 표시됩니다.
@@ -218,10 +232,15 @@ python main.py --simulate --practice
 
 마우스는 키보드와 완전히 분리된 독립 컨트롤러이며 **ACTIVE 상태에서만** 동작합니다.
 
-**마우스 모드 켜기:** 오른손 **가리키기 자세**(검지를 위로 펴고 약지·새끼를 주먹 쥐듯 접기, 중지는 자유)를 0.25초 유지.
+**마우스 모드 켜기:** 오른손 **가리키기 자세**(검지를 펴고 약지·새끼를 주먹 쥐듯 접기, 중지는 자유)를 0.25초 유지.
 손 모양으로 모드를 정하므로 **키보드를 화면 어디에 두든 마우스와 겹치지 않습니다.**
-- 마우스 모드 중에는 오른손 손가락이 키 입력에 쓰이지 않습니다 (손가락 카드에 `mouse` 로 표시).
-- 손을 펴서 타이핑 자세로 돌아가면 0.4초 뒤 타이핑 모드로 복귀합니다.
+- **마우스 모드 중에는 키보드 입력이 모두 멈춥니다** (양손). 가상 키보드와 HUD 키보드가 어둡게 덮이고
+  `MOUSE MODE` 가 표시되며, 손가락 카드에는 `mouse` 로 나옵니다.
+  왼손은 계속 타이핑하고 싶으면 `--mouse-exclusive false`.
+- **약지·새끼를 접고 있는 동안 마우스 모드가 유지**됩니다. 클릭하려고 엄지-검지를 붙여 검지가 굽혀져도 풀리지 않습니다.
+- 가리키기 자세가 보이는 순간(확정 전)부터 오른손 키 입력은 막힙니다.
+- **약지·새끼를 펴서** 타이핑 자세로 돌아가면 0.4초 뒤 타이핑 모드로 복귀하고, 그 뒤 0.4초 동안은
+  손을 내리는 동작이 키로 잡히지 않게 입력을 막습니다. 손이 0.6초 이상 안 보여도 마우스 모드가 풀립니다.
 - 커서 범위: 카메라 화면 가운데 영역(가로 15~85%, 세로 10~70%)이 모니터 전체에 대응합니다.
 
 | 동작 | 제스처 |
@@ -458,6 +477,11 @@ python -m pytest
 
 | 증상 | 해결 |
 |---|---|
+| `import cv2` 오류 / `cv2` 모듈 관련 이상한 오류 | OpenCV 패키지 충돌. `pip uninstall -y opencv-python opencv-contrib-python` 후 `pip install -r requirements.txt` |
+| `pip install` 중 mediapipe 설치 실패 | Python 버전 확인 (3.10 ~ 3.13). 3.14 이상은 아직 MediaPipe 휠이 없을 수 있음 |
+| 모델 다운로드 실패 | 인터넷/프록시 확인. 안내된 주소에서 직접 받아 `models/hand_landmarker.task` 에 저장 |
+| `[경고] 실제 입력 전송 실패` | 입력하려는 창이 관리자 권한으로 실행 중이면 이 프로그램도 관리자 권한으로 실행해야 함 |
+| 창이 화면보다 큼 | 자동으로 화면의 90% 이내로 맞춥니다. 창 모서리를 끌어 크기 조절 가능 |
 | `웹캠 연결 실패` (종료 코드 2) | 다른 앱(Zoom, Teams, 카메라 앱)이 카메라를 쓰고 있지 않은지 확인. Windows: 설정 → 개인정보 → **카메라** → 데스크톱 앱 허용. `--camera-index 1` 등 다른 번호 시도 |
 | 웹캠 열기가 수십 초 걸린 뒤 실패 | Windows MSMF 드라이버가 사용 중인 카메라를 기다리는 것. 위 항목 확인 |
 | `4K 미지원 → ...으로 자동 전환됨` | 정상 동작 (지원하는 해상도로 폴백) |

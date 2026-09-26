@@ -34,7 +34,8 @@ class DesktopOverlay:
             raise ValueError(f"corner 는 {CORNERS} 중 하나")
         self.screen_w, self.screen_h = screen_size
         self.corner = corner
-        self.scale = scale
+        self.scale = min(max(scale, 0.5), 3.0)
+        scale = self.scale
         self.alpha = alpha
         self.w, self.h = int(BASE_W * scale), int(BASE_H * scale)
         # Renderer 는 캔버스 높이 720 을 기준 단위로 쓰므로, s 를 직접 지정해 픽셀 크기를 맞춘다
@@ -45,10 +46,16 @@ class DesktopOverlay:
 
     # ------------------------------------------------------------------
     def position(self) -> Tuple[int, int]:
-        margin_x, margin_top, margin_bottom = int(16 * self.scale), int(16 * self.scale), int(64 * self.scale)
-        x = self.screen_w - self.w - margin_x if self.corner.endswith("r") else margin_x
-        y = self.screen_h - self.h - margin_bottom if self.corner.startswith("b") else margin_top
-        return x, y
+        """작업 표시줄을 뺀 작업 영역의 모서리에 배치 (Windows). 그 외엔 화면 기준 + 여백."""
+        area = _work_area() if sys.platform.startswith("win") else None
+        m = int(12 * self.scale)
+        if area is not None:
+            left, top, right, bottom = area
+        else:
+            left, top, right, bottom = 0, 0, self.screen_w, self.screen_h - int(56 * self.scale)
+        x = right - self.w - m if self.corner.endswith("r") else left + m
+        y = bottom - self.h - m if self.corner.startswith("b") else top + m
+        return max(0, x), max(0, y)
 
     def render(self, snap: Optional[Snapshot], info: RenderInfo):
         r = self.renderer
@@ -176,6 +183,19 @@ WS_EX_LAYERED, WS_EX_NOACTIVATE = 0x80000, 0x08000000
 LWA_COLORKEY, LWA_ALPHA = 0x1, 0x2
 HWND_TOPMOST = -1
 SWP_NOACTIVATE, SWP_FRAMECHANGED, SWP_SHOWWINDOW = 0x10, 0x20, 0x40
+
+
+def _work_area() -> Optional[Tuple[int, int, int, int]]:
+    """주 모니터에서 작업 표시줄을 제외한 영역 (left, top, right, bottom)."""
+    from ctypes import wintypes
+
+    try:
+        rect = wintypes.RECT()
+        if ctypes.windll.user32.SystemParametersInfoW(0x0030, 0, ctypes.byref(rect), 0):  # SPI_GETWORKAREA
+            return rect.left, rect.top, rect.right, rect.bottom
+    except (AttributeError, OSError):
+        pass
+    return None
 
 
 def _style_win32(title: str, x: int, y: int, w: int, h: int, key_bgr, alpha: float) -> bool:

@@ -211,3 +211,110 @@ def test_processor_mouse_mode_independent_of_keyboard_position(cfg):
 def test_default_keyboard_is_raised():
     c = Calibration.default()
     assert c.y + c.height < 720 * 0.85            # 화면 맨 아래에 붙지 않음
+
+
+# ---------------------------------------------------------------- 마우스/키보드 모드 분리
+from dataclasses import replace as _replace  # noqa: E402
+
+from vkeyboard.config import AppConfig as _AppConfig  # noqa: E402
+from vkeyboard.gesture_controller import is_mouse_hold  # noqa: E402
+from vkeyboard.geometry import HandObservation  # noqa: E402
+
+
+def _pinch_bent_index():
+    """클릭 핀치 순간: 검지가 굽혀져 엄지에 닿음 (가리키기 자세는 깨지지만 약지·새끼는 접힌 상태)."""
+    h = pointing_hand("Right", 880, 600)
+    lm = list(h.landmarks)
+    lm[8] = lm[5] + P(-5, -20)          # 굽힌 검지 끝
+    lm[4] = lm[8] + P(4, 2)             # 엄지가 검지 끝에 닿음
+    return HandObservation("Right", lm, h.confidence)
+
+
+def _left_typing(press=0.0):
+    tips = {"thumb": P(420, 600), "index": P(460, 470), "middle": P(420, 470), "ring": P(380, 470),
+            "pinky": P(340, 470)}
+    return typing_hand("Left", tips, {"index": press})
+
+
+def test_pinch_with_bent_index_keeps_mouse_mode():
+    assert not is_pointing(_pinch_bent_index().landmarks)
+    assert is_mouse_hold(_pinch_bent_index().landmarks)
+    m = MouseModeDetector(enter_time=0.25, exit_time=0.4)
+    m.update(pointing_hand("Right", 880, 600), 0.0)
+    assert m.update(pointing_hand("Right", 880, 600), 0.3)
+    for i in range(30):                                   # 1초 동안 핀치 유지해도
+        assert m.update(_pinch_bent_index(), 0.3 + i / 30)  # 마우스 모드 유지
+
+
+def test_mouse_mode_exits_when_hand_lost():
+    m = MouseModeDetector(enter_time=0.25, exit_time=0.4, lost_time=0.6)
+    m.update(pointing_hand("Right", 880, 600), 0.0)
+    assert m.update(pointing_hand("Right", 880, 600), 0.3)
+    assert m.update(None, 0.5) is True                    # 잠깐 안 보임 -> 유지
+    assert m.update(None, 1.2) is False                   # 0.6초 이상 -> 해제
+
+
+def _run(p, frames, hands_fn, t0=0.0):
+    events, t = [], t0
+    for i in range(frames):
+        snap, ev = p.process(hands_fn(i), t)
+        events += ev
+        t += 1 / 30
+    return snap, events, t
+
+
+def test_right_hand_keys_blocked_from_first_pointing_frame(cfg):
+    p = InputProcessor(cfg, Calibration.default(), (1920, 1080))
+    p.gesture.set_active(True)
+    snap, _, _ = _run(p, 1, lambda i: [_left_typing(), pointing_hand("Right", 880, 600)])
+    assert not snap.mouse_mode                            # 아직 확정 전이지만
+    assert all(v.reason == "mouse" for f, v in snap.finger_views.items() if f.hand == "Right")
+
+
+def test_mouse_mode_pauses_left_hand_typing(cfg):
+    p = InputProcessor(cfg, Calibration.default(), (1920, 1080))
+    p.gesture.set_active(True)
+    point = pointing_hand("Right", 880, 600)
+    _, _, t = _run(p, 12, lambda i: [_left_typing(), point])
+    # 마우스 모드 중 왼손 검지로 키를 눌러도 입력 안 됨
+    snap, events, _ = _run(p, 10, lambda i: [_left_typing(25.0 if i >= 3 else 0.0), point], t)
+    assert snap.mouse_mode
+    assert not [e for e in events if hasattr(e, "key")]
+    assert all(v.reason == "mouse" for v in snap.finger_views.values())
+
+
+def test_mouse_exclusive_false_keeps_left_hand_typing():
+    cfg = _replace(_AppConfig(), mouse_exclusive=False)
+    p = InputProcessor(cfg, Calibration.default(), (1920, 1080))
+    p.gesture.set_active(True)
+    point = pointing_hand("Right", 880, 600)
+    snap, _, _ = _run(p, 12, lambda i: [_left_typing(), point])
+    assert snap.mouse_mode
+    assert all(v.reason != "mouse" for f, v in snap.finger_views.items() if f.hand == "Left")
+
+
+def test_keys_blocked_briefly_after_leaving_mouse_mode(cfg):
+    p = InputProcessor(cfg, Calibration.default(), (1920, 1080))
+    p.gesture.set_active(True)
+    point = pointing_hand("Right", 880, 600)
+    _, _, t = _run(p, 12, lambda i: [_left_typing(), point])
+    right_typing = _typing_right()
+    # 약지·새끼를 펴서 타이핑 자세로 복귀: 0.4초 뒤 해제, 그 뒤 0.4초는 여전히 차단
+    snap, _, t = _run(p, 14, lambda i: [_left_typing(), right_typing], t)
+    assert not snap.mouse_mode
+    assert all(v.reason == "mouse" for v in snap.finger_views.values())
+    snap, _, _ = _run(p, 15, lambda i: [_left_typing(), right_typing], t)
+    assert all(v.reason != "mouse" for v in snap.finger_views.values())
+
+
+def test_click_with_bent_index_pinch_produces_click_not_keys(cfg):
+    p = InputProcessor(cfg, Calibration.default(), (1920, 1080))
+    p.gesture.set_active(True)
+    point = pointing_hand("Right", 880, 600)
+    _, events, t = _run(p, 12, lambda i: [_left_typing(), point])
+    _, ev2, t = _run(p, 4, lambda i: [_left_typing(), _pinch_bent_index()], t)
+    _, ev3, _ = _run(p, 4, lambda i: [_left_typing(), point], t)
+    all_ev = events + ev2 + ev3
+    assert [e.action for e in all_ev if getattr(e, "action", None) not in (None, MouseAction.MOVE)] == \
+        [MouseAction.LEFT_CLICK]
+    assert not [e for e in all_ev if hasattr(e, "key")]

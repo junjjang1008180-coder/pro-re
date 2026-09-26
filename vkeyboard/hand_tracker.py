@@ -6,24 +6,34 @@
 from __future__ import annotations
 
 import os
+import shutil
 import urllib.request
 from typing import List
 
-from .config import MODEL_URL, AppConfig
+from .config import MIN_MODEL_BYTES, MODEL_DOWNLOAD_TIMEOUT, MODEL_URL, AppConfig
 from .frame_scaler import FrameScaler
 from .geometry import HandObservation
 
 
-def ensure_model(path: str, url: str = MODEL_URL) -> str:
-    """모델 파일이 없으면 공식 배포 주소에서 내려받는다."""
-    if os.path.exists(path):
+def ensure_model(path: str, url: str = MODEL_URL, timeout: float = MODEL_DOWNLOAD_TIMEOUT) -> str:
+    """모델 파일이 없거나 손상(너무 작음)됐으면 공식 배포 주소에서 내려받는다."""
+    if os.path.exists(path) and os.path.getsize(path) >= MIN_MODEL_BYTES:
         return path
     folder = os.path.dirname(os.path.abspath(path))
     os.makedirs(folder, exist_ok=True)
     print(f"[정보] 손 랜드마크 모델이 없어 다운로드합니다: {url}")
     tmp = path + ".part"
-    urllib.request.urlretrieve(url, tmp)
-    os.replace(tmp, path)
+    try:
+        with urllib.request.urlopen(url, timeout=timeout) as resp, open(tmp, "wb") as f:
+            shutil.copyfileobj(resp, f)
+        if os.path.getsize(tmp) < MIN_MODEL_BYTES:
+            raise RuntimeError("받은 파일이 너무 작습니다 (네트워크/프록시 차단 가능성)")
+        os.replace(tmp, path)
+    except Exception as e:
+        if os.path.exists(tmp):
+            os.remove(tmp)
+        raise RuntimeError(f"모델 다운로드 실패: {e}\n"
+                           f"  → 인터넷 연결을 확인하거나, 위 주소에서 직접 받아 {path} 에 두세요") from e
     print(f"[정보] 모델 저장 완료: {path} ({os.path.getsize(path) / 1e6:.1f} MB)")
     return path
 
@@ -37,8 +47,11 @@ class HandTracker:
         self._mp = mp
         self.scaler = scaler
         model_path = ensure_model(cfg.model_path)
+        # 경로 대신 바이트로 넘긴다: MediaPipe(C++)는 Windows 에서 한글 등 비ASCII 경로를 열지 못한다
+        with open(model_path, "rb") as f:
+            model_bytes = f.read()
         options = vision.HandLandmarkerOptions(
-            base_options=BaseOptions(model_asset_path=model_path),
+            base_options=BaseOptions(model_asset_buffer=model_bytes),
             running_mode=vision.RunningMode.VIDEO,
             num_hands=2,
             min_hand_detection_confidence=0.5,

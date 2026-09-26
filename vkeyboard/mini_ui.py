@@ -89,7 +89,7 @@ def unicode_font():
                     try:
                         _uni_font = cv2.FontFace(path)
                         break
-                    except cv2.error:
+                    except Exception:  # noqa: BLE001 — 폰트 로드 실패 시 영문 대체 문구 사용
                         continue
     return _uni_font
 
@@ -296,12 +296,26 @@ class Renderer:
             color = BLACK if flashing else (TEXT if code in selected else (225, 220, 215))
             self._key_label(canvas, code, p0, p1, color, info.korean)
 
+        if snap is not None and snap.mouse_mode and not info.calibration_mode:
+            # 마우스 모드: 키보드를 어둡게 덮고 표시 -> 지금은 키 입력이 안 된다는 것을 분명히
+            self._dim_with_label(canvas, bx0 - pad, by0 - pad, bx1 + pad, by1 + pad, self.u(12),
+                                 "MOUSE MODE  -  keyboard paused", 0.6)
+
         if info.calibration_mode:
             rounded_rect(canvas, bx0 - pad, by0 - pad, bx1 + pad, by1 + pad, self.u(12), ACCENT, self.th(2))
             hs = self.u(6)
             for cx, cy in ((bx0 - pad, by0 - pad), (bx1 + pad, by0 - pad), (bx0 - pad, by1 + pad),
                            (bx1 + pad, by1 + pad)):
                 cv2.rectangle(canvas, (cx - hs, cy - hs), (cx + hs, cy + hs), ACCENT, -1)
+
+    def _dim_with_label(self, canvas, x0, y0, x1, y1, r, label: str, scale: float) -> None:
+        glass_panel(canvas, x0, y0, x1, y1, r, (20, 14, 10), 0.7)
+        rounded_rect(canvas, x0, y0, x1, y1, r, ACCENT, self.th(2))
+        tw = self.text_w(label, scale, 1.5)
+        pw = tw + self.u(24)
+        ph = self.text_h(scale) + self.u(14)
+        cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
+        self.pill(canvas, label, cx - pw / 2, cy - ph / 2, scale, BLACK, ACCENT, pad=12, weight=1.5)
 
     def _key_label(self, canvas, code: KeyCode, p0, p1, color, korean: bool) -> None:
         cx, cy = (p0[0] + p1[0]) / 2, (p0[1] + p1[1]) / 2
@@ -498,7 +512,7 @@ class Renderer:
                         rounded_rect(canvas, gx0, gy - self.u(2), fill_x, gy + self.u(2), self.u(2), gcol)
                     tick = gx0 + int((gx1 - gx0) / 1.5)
                     cv2.line(canvas, (tick, gy - self.u(4)), (tick, gy + self.u(4)), WHITE, self.th(1), AA)
-                key = v.selected_key.label if (v is not None and v.selected_key) else ""
+                key = v.selected_key.label if (v is not None and v.valid and v.selected_key) else ""
                 if key:
                     self.text(canvas, key, x0 + w - px - self.text_w(key, 0.4, 1.3), y - self.u(5), 0.4,
                               FINGER_COLORS[f], 1.3)
@@ -569,6 +583,9 @@ class Renderer:
             rounded_rect(canvas, x - p, y - p, x + kw + p, y + kh + p, self.u(3.5), WHITE)
             if labels:
                 self._mini_label(canvas, k.code, x, y, kw, kh, BLACK, info.korean, bold=True)
+        if snap is not None and snap.mouse_mode:
+            self._dim_with_label(canvas, kx - self.u(2), ky - self.u(2), kx + kb_w + self.u(2), ky + kb_h + self.u(2),
+                                 self.u(4), "MOUSE MODE", 0.4)
         return kb_h
 
     def _mini_label(self, canvas, code: KeyCode, x, y, kw, kh, color, korean: bool, bold: bool = False) -> None:

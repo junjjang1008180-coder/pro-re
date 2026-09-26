@@ -189,3 +189,35 @@ def test_position_handedness_ignores_flipped_model_labels():
     assert normalize_handedness([left_side], split_x=640)[0].handedness == "Left"
     # model 모드(split_x 없음)는 라벨 유지
     assert normalize_handedness([right_side])[0].handedness == "Left"
+
+
+
+@pytest.mark.parametrize("content", [
+    '{"x": 1, "y": 1, "width": 500, "height": 200, "infer_width": 0, "infer_height": 720}',
+    '{"x": NaN, "y": 1, "width": 500, "height": 200}',
+    '{"x": 1, "y": 1, "width": -5, "height": 200}',
+    '[1, 2, 3]',
+])
+def test_invalid_calibration_values_fall_back_to_default(tmp_path, content):
+    bad = tmp_path / "c.json"
+    bad.write_text(content, encoding="utf-8")
+    assert Calibration.load(str(bad)) == Calibration.default()
+
+
+def test_save_does_not_leave_temp_file(tmp_path):
+    path = tmp_path / "c.json"
+    Calibration.default().save(str(path))
+    assert path.exists() and not (tmp_path / "c.json.tmp").exists()
+
+
+def test_single_hand_keeps_label_while_crossing_center():
+    """오른손 하나로 마우스를 움직이다 화면 왼쪽으로 넘어가도 오른손으로 유지."""
+    from vkeyboard.finger_tracker import normalize_handedness
+
+    right = HandObservation("Left", _hand(offset_x=-150).landmarks, 0.9)   # 중심 x 약 390 (split 640 왼쪽)
+    no_memory = normalize_handedness([right], split_x=640)
+    assert no_memory[0].handedness == "Left"
+    kept = normalize_handedness([right], split_x=640, prev_centers={"Right": 450.0}, keep_dist=320)
+    assert kept[0].handedness == "Right"
+    far = normalize_handedness([right], split_x=640, prev_centers={"Right": 1100.0}, keep_dist=320)
+    assert far[0].handedness == "Left"                       # 멀리 떨어져 있으면 위치 기준

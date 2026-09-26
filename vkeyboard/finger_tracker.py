@@ -40,12 +40,16 @@ def _center_x(hand: HandObservation) -> float:
 
 
 def normalize_handedness(hands: Sequence[HandObservation],
-                         split_x: Optional[float] = None) -> List[HandObservation]:
+                         split_x: Optional[float] = None,
+                         prev_centers: Optional[Dict[str, float]] = None,
+                         keep_dist: float = 0.0) -> List[HandObservation]:
     """최대 2손의 좌/우 라벨을 정리한다.
 
     split_x 가 없으면 MediaPipe 라벨을 쓰되, 두 손이 같은 쪽으로 나오면 화면 x 위치로 나눈다.
     split_x 가 있으면(위치 기준 모드) 라벨을 무시하고 화면 위치로 정한다:
     두 손이면 왼쪽 손 = Left, 한 손이면 split_x(키보드 중앙) 왼쪽 = Left.
+    단, 한 손만 보일 때 prev_centers(직전 프레임 손 중심 x)에서 keep_dist 안이면 같은 손으로 유지한다
+    (오른손으로 마우스를 움직이다 화면 왼쪽으로 가도 왼손으로 바뀌지 않게).
     MediaPipe 는 손바닥 기준으로 좌우를 판별하므로, 타이핑 자세처럼 손등이 카메라를 향하면
     좌우가 뒤집혀 나온다 -> 가상 키보드에서는 위치 기준이 더 안정적이다.
     """
@@ -57,7 +61,13 @@ def normalize_handedness(hands: Sequence[HandObservation],
                 HandObservation("Right", b.landmarks, b.confidence)]
     if len(hands) == 1 and split_x is not None:
         h = hands[0]
-        return [HandObservation("Left" if _center_x(h) < split_x else "Right", h.landmarks, h.confidence)]
+        cx = _center_x(h)
+        label = "Left" if cx < split_x else "Right"
+        if prev_centers:
+            near = min(prev_centers.items(), key=lambda kv: abs(kv[1] - cx))
+            if abs(near[1] - cx) <= keep_dist:
+                label = near[0]
+        return [HandObservation(label, h.landmarks, h.confidence)]
     return hands
 
 
