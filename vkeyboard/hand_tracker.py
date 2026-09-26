@@ -8,10 +8,12 @@ from __future__ import annotations
 import os
 import shutil
 import urllib.request
-from typing import List
+from typing import List, Optional, Tuple
 
-from .config import MIN_MODEL_BYTES, MODEL_DOWNLOAD_TIMEOUT, MODEL_URL, AppConfig
+from .config import (MAX_HANDS_DETECT, MAX_POSES, MIN_MODEL_BYTES, MODEL_DOWNLOAD_TIMEOUT, MODEL_URL,
+                     POSE_EVERY_N_FRAMES, POSE_MODEL_URL, AppConfig)
 from .frame_scaler import FrameScaler
+from .body_owner import POSE_POINTS, PoseObservation
 from .geometry import HandObservation
 
 
@@ -53,7 +55,7 @@ class HandTracker:
         options = vision.HandLandmarkerOptions(
             base_options=BaseOptions(model_asset_buffer=model_bytes),
             running_mode=vision.RunningMode.VIDEO,
-            num_hands=2,
+            num_hands=MAX_HANDS_DETECT,     # 여러 손을 찾은 뒤 HandSelector 가 내 손 2개만 고른다
             min_hand_detection_confidence=0.5,
             min_hand_presence_confidence=cfg.min_tracking_confidence,
             min_tracking_confidence=cfg.min_tracking_confidence,
@@ -63,7 +65,27 @@ class HandTracker:
         self.presence_threshold = cfg.min_tracking_confidence
         self._last_ts = -1
 
+        # 내 손만 인식(몸 기준)용 포즈 인식. 실패해도 프로그램은 크기 기준으로 계속 동작한다.
+        self._pose = None
+        self._pose_frame = 0
+        self._last_poses: Optional[List[PoseObservation]] = None
+        if cfg.hand_lock in ("body", "strict"):
+            try:
+                pose_path = ensure_model(cfg.pose_model_path, POSE_MODEL_URL)
+                with open(pose_path, "rb") as f:
+                    pose_bytes = f.read()
+                self._pose = vision.PoseLandmarker.create_from_options(vision.PoseLandmarkerOptions(
+                    base_options=BaseOptions(model_asset_buffer=pose_bytes),
+                    running_mode=vision.RunningMode.VIDEO, num_poses=MAX_POSES))
+            except Exception as e:  # noqa: BLE001
+                print(f"[경고] 몸(포즈) 인식을 쓸 수 없어 '내 손만 인식'을 손 크기 기준으로 합니다: {e}")
+
     def detect(self, frame_bgr_infer, timestamp_ms: int) -> List[HandObservation]:
+        return self.detect_all(frame_bgr_infer, timestamp_ms)[0]
+
+    def detect_all(self, frame_bgr_infer, timestamp_ms: int
+                   ) -> Tuple[List[HandObservation], Optional[List[PoseObservation]]]:
+        """(손 목록, 사람 포즈 목록 또는 None=포즈 인식 안 씀)."""
         import cv2
 
         ts = max(int(timestamp_ms), self._last_ts + 1)   # VIDEO 모드는 단조 증가 타임스탬프 필요
@@ -71,6 +93,7 @@ class HandTracker:
         rgb = cv2.cvtColor(frame_bgr_infer, cv2.COLOR_BGR2RGB)
         image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
         result = self._landmarker.detect_for_video(image, ts)
+        poses = self._detect_poses(image, ts)
         hands: List[HandObservation] = []
         for i, lms in enumerate(result.hand_landmarks or []):
             label, score = "Right", 0.0
@@ -84,10 +107,31 @@ class HandTracker:
             if self.handedness_mode == "position":
                 score = max(score, self.presence_threshold)
             hands.append(HandObservation(label, pts, score))
-        return hands
+        return hands, poses
+
+    def _detect_poses(self, image, ts: int) -> Optional[List[PoseObservation]]:
+        if self._pose is None:
+            return None
+        self._pose_frame += 1
+        if self._last_poses is not None and self._pose_frame % POSE_EVERY_N_FRAMES != 0:
+            return self._last_poses
+        result = self._pose.detect_for_video(image, ts)
+        poses: List[PoseObservation] = []
+        for lms in result.pose_landmarks or []:
+            pose = PoseObservation()
+            for idx in POSE_POINTS:
+                lm = lms[idx]
+                pose.points[idx] = self.scaler.normalized_to_infer(lm.x, lm.y)
+                vis = getattr(lm, "visibility", None)
+                pose.visibility[idx] = 1.0 if vis is None else float(vis)   # 값이 없으면 보이는 것으로
+            poses.append(pose)
+        self._last_poses = poses
+        return poses
 
     def close(self) -> None:
-        try:
-            self._landmarker.close()
-        except Exception:  # noqa: BLE001
-            pass
+        for task in (self._landmarker, self._pose):
+            try:
+                if task is not None:
+                    task.close()
+            except Exception:  # noqa: BLE001
+                pass

@@ -14,6 +14,8 @@ from .events import ModeEvent
 from .finger_tracker import FingerSample, FingerTracker, _center_x, normalize_handedness
 from .geometry import HandObservation
 from .gesture_controller import GestureController, MouseModeDetector
+from .body_owner import BodyOwnerSelector, PoseObservation
+from .hand_lock import TrackLockSelector
 from .keyboard_controller import FingerView, KeyboardController
 from .keyboard_layout import Finger, KeyboardLayout
 from .mouse_controller import MouseController, MouseView
@@ -35,6 +37,10 @@ class Snapshot:
     infer_fps: float = 0.0
     palm_open: Dict[str, bool] = field(default_factory=dict)
     mouse_mode: bool = False
+    ignored_hands: List[HandObservation] = field(default_factory=list)   # 내 손이 아니라고 판단해 무시한 손
+    hand_registered: bool = False
+    owner_status: str = ""            # locked | lost_* | not_locked | body | fallback | no_user | size
+    user_pose: Optional[PoseObservation] = None
 
 
 class InputProcessor:
@@ -48,6 +54,10 @@ class InputProcessor:
         self.mouse = MouseController(cfg, screen_size)
         self.gesture = GestureController(cfg.palm_toggle_hold)
         self.mouse_mode = MouseModeDetector(lost_time=MOUSE_LOST_TIME)
+        if cfg.hand_lock == "track":
+            self.selector = TrackLockSelector(cfg.infer_width)
+        else:
+            self.selector = BodyOwnerSelector(cfg.hand_lock, cfg.infer_width)
         self.mouse_enabled = mouse_enabled
         self._pending_cal: Optional[Calibration] = None
         self._lock = threading.Lock()
@@ -89,13 +99,18 @@ class InputProcessor:
             self.layout = KeyboardLayout.from_calibration(cal)
             self.keyboard.set_layout(self.layout)
 
-    def process(self, hands: Sequence[HandObservation], t: float) -> Tuple[Snapshot, list]:
+    def process(self, hands: Sequence[HandObservation], t: float,
+                poses: Optional[Sequence[PoseObservation]] = None) -> Tuple[Snapshot, list]:
         self._manual_toggle = False
         self._force_off = False
         self._apply_pending()
-        split_x = self.layout.x + self.layout.width / 2 if self.cfg.handedness == "position" else None
-        prev = self._hand_centers if t - self._hand_centers_t <= 0.5 else None
-        hands = normalize_handedness(hands, split_x, prev, HAND_LABEL_MEMORY * self.cfg.infer_width)
+        # 내 손만: 등록한 손을 계속 추적(track) 또는 사용자 몸에 붙은 손(body)
+        hands, ignored, body_labeled = self.selector.select(hands, poses, t)
+        if not body_labeled:
+            split_x = self.layout.x + self.layout.width / 2 if self.cfg.handedness == "position" else None
+            prev = self._hand_centers if t - self._hand_centers_t <= 0.5 else None
+            hands = normalize_handedness(hands, split_x, prev, HAND_LABEL_MEMORY * self.cfg.infer_width)
+        # (몸 기준이면 손이 붙은 팔의 어깨 위치로 좌/우가 이미 정해져 있다)
         if hands:
             self._hand_centers = {h.handedness: _center_x(h) for h in hands}
             self._hand_centers_t = t
@@ -107,11 +122,14 @@ class InputProcessor:
         toggled = self.gesture.update(hands, t)
         if toggled is not None:
             events.append(ModeEvent(toggled, "gesture", t))
+            if toggled:
+                self.selector.register(hands, poses, t)  # 양손을 편 이 두 손 = 사용자 손으로 잠금
         if self._manual_toggle:
             new_state = not self.gesture.active
             self.gesture.set_active(new_state)
             events.append(ModeEvent(new_state, "manual", t))
             if new_state:
+                self.selector.request_register()     # 다음에 두 손이 보일 때 등록
                 # 키보드로 'a' 를 누른 뒤 손을 카메라 앞으로 가져올 시간을 준다
                 self._last_seen = t
                 self._grace_until = t + MANUAL_ACTIVATION_GRACE
@@ -155,5 +173,8 @@ class InputProcessor:
         snap = Snapshot(t=t, hands=list(hands), finger_views=dict(self.keyboard.views), active=active,
                         toggle_progress=self.gesture.progress, tracking_confidence=conf,
                         mouse=self.mouse.view, calibration=self.calibration,
-                        palm_open=dict(self.gesture.open_state), mouse_mode=mouse_mode)
+                        palm_open=dict(self.gesture.open_state), mouse_mode=mouse_mode,
+                        ignored_hands=list(ignored),
+                        hand_registered=self.selector.registered or self.selector.size_selector.registered,
+                        owner_status=self.selector.status, user_pose=self.selector.user_pose)
         return snap, events

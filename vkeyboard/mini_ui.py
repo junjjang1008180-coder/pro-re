@@ -98,6 +98,26 @@ def _is_ascii(txt: str) -> bool:
     return all(ord(c) < 128 for c in txt)
 
 
+_OWNER_TEXT = {
+    "locked": "locked: your 2 hands", "not_locked": "not locked - open both palms",
+    "lost_Left": "left hand lost - show palm", "lost_Right": "right hand lost - show palm",
+    "lost_Left_Right": "hands lost - show palms", "body": "your body (arms)",
+    "fallback": "no body seen - size", "no_user": "you are not visible", "size": "hand size", "waiting": "-",
+}
+
+
+def _owner_text(status: str) -> str:
+    return _OWNER_TEXT.get(status, "-")
+
+
+def _owner_color(status: str):
+    if status in ("locked", "body"):
+        return GOOD
+    if status.startswith("lost") or status == "no_user":
+        return WARN
+    return MUTED
+
+
 def short_name(f: Finger) -> str:
     return ("L " if f.hand == "Left" else "R ") + f.digit
 
@@ -346,6 +366,25 @@ class Renderer:
 
     # --- 손 ------------------------------------------------------------------
     def draw_hands(self, canvas, snap: Snapshot) -> None:
+        if snap.user_pose is not None:
+            # 사용자 몸(어깨-팔꿈치-손목): 이 팔 끝에 붙은 손만 입력에 쓴다
+            for label, elbow, wrist in snap.user_pose.arms():
+                sh = snap.user_pose.shoulders()
+                start = min(sh, key=lambda p: p.x) if label == "Left" else max(sh, key=lambda p: p.x)
+                chain = [p for p in (start, elbow, wrist) if p is not None]
+                for a, b in zip(chain, chain[1:]):
+                    cv2.line(canvas, self.scaler.infer_to_display_pt(a), self.scaler.infer_to_display_pt(b),
+                             HAND_COLORS[label], self.th(1), AA)
+                for p in chain:
+                    cv2.circle(canvas, self.scaler.infer_to_display_pt(p), self.u(3), HAND_COLORS[label], -1, AA)
+        for hand in snap.ignored_hands:
+            # 내 손이 아니라고 판단해 무시한 손: 회색 얇은 선
+            pts = [self.scaler.infer_to_display_pt(p) for p in hand.landmarks]
+            for a, b in HAND_CONNECTIONS:
+                cv2.line(canvas, pts[a], pts[b], FAINT, self.th(1), AA)
+            wx, wy = pts[WRIST]
+            w = self.text_w("NOT YOURS", 0.34) + self.u(12)
+            self.pill(canvas, "NOT YOURS", wx - w / 2, wy + self.u(10), 0.34, MUTED, (60, 52, 46))
         for hand in snap.hands:
             color = HAND_COLORS.get(hand.handedness, TEXT)
             pts = [self.scaler.infer_to_display_pt(p) for p in hand.landmarks]
@@ -403,8 +442,11 @@ class Renderer:
              TEXT),
             ("Camera", f"{info.capture_size[0]}x{info.capture_size[1]} -> "
                        f"{self.scaler.infer_width}x{self.scaler.infer_height}", TEXT),
-            ("Tracking", f"{snap.tracking_confidence if snap else 0:.2f}   {len(snap.hands) if snap else 0} hands",
+            ("Tracking", f"{snap.tracking_confidence if snap else 0:.2f}   {len(snap.hands) if snap else 0} hands"
+                         + (f"  (+{len(snap.ignored_hands)} ignored)" if snap and snap.ignored_hands else "")
+                         + ("  [locked]" if snap and snap.hand_registered else ""),
              GOOD if snap and snap.tracking_confidence >= 0.75 else (WARN if snap and snap.hands else MUTED)),
+            ("Owner", _owner_text(snap.owner_status if snap else ""), _owner_color(snap.owner_status if snap else "")),
             ("Last key", info.last_key, TEXT),
             ("Mouse", ("ON  " if snap is not None and snap.mouse_mode else "") + info.last_mouse,
              ACCENT if snap is not None and snap.mouse_mode else TEXT),

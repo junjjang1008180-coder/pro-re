@@ -167,8 +167,8 @@ class InferenceThread(threading.Thread):
                         break
                     continue
                 small = self.scaler.resize_for_inference(item.image)
-                hands = self.tracker.detect(small, int(item.t * 1000))
-                snap, events = self.processor.process(hands, item.t)
+                hands, poses = self.tracker.detect_all(small, int(item.t * 1000))
+                snap, events = self.processor.process(hands, item.t, poses)
                 now = time.monotonic()
                 if last is not None and now > last:
                     inst = 1.0 / (now - last)

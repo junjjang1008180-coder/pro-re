@@ -76,7 +76,10 @@ TRACKING_LOST_TIMEOUT = 0.7      # ACTIVE 중 손이 이 시간 이상 사라지
 CLICK_RELEASE_FACTOR = 1.4       # 핀치 해제 거리 = 핀치 거리 * 배율 (히스테리시스)
 PINCH_MIN_FRAMES = 2             # 핀치가 N프레임 연속 유지돼야 인정(디바운스)
 CLICK_MAX_DURATION = 0.6         # 이보다 오래 붙이고 있으면 클릭이 아님
-DRAG_START_DISTANCE = 25.0       # 핀치 상태에서 이만큼 이동하면 드래그 시작
+DRAG_START_DISTANCE = 12.0       # 핀치 상태에서 이만큼 이동하면 드래그 시작 (25 -> 12: 드래그 감도 향상)
+DRAG_HOLD_TIME = 0.4             # 핀치를 이만큼 유지하면 움직이지 않아도 드래그 시작 (꾹 눌러 끌기)
+DRAG_RELEASE_FACTOR = 1.8        # 드래그 중 해제 거리 배율 (클릭보다 크게: 빨리 움직일 때 엄지가 살짝 벌어져도 유지)
+DRAG_RELEASE_FRAMES = 3          # 드래그 중 해제에 필요한 연속 프레임 수
 DOUBLE_CLICK_MIN_INTERVAL = 0.06 # 더블클릭 두 번째 클릭 최소 간격(디바운스)
 MOUSE_REGION = (0.15, 0.10, 0.85, 0.70)  # 추론 프레임 정규화 좌표 (x0, y0, x1, y1) -> 화면 전체로 매핑
 ONE_EURO_MIN_CUTOFF = 1.2
@@ -92,6 +95,7 @@ CAMERA_FAIL_LIMIT = 30           # 연속 읽기 실패 허용 횟수
 # 기본 파일 경로는 실행 위치(현재 폴더)가 아니라 프로젝트 폴더 기준 -> 어디서 실행해도 같은 파일을 쓴다
 PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 DEFAULT_MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "hand_landmarker.task")
+DEFAULT_POSE_MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "pose_landmarker_lite.task")
 DEFAULT_CALIBRATION_FILE = os.path.join(PROJECT_ROOT, "calibration.json")
 DEFAULT_PRACTICE_OUTPUT = os.path.join(PROJECT_ROOT, "practice_result.json")
 MIN_MODEL_BYTES = 1_000_000      # 이보다 작은 모델 파일은 다운로드 실패/손상으로 간주
@@ -103,7 +107,33 @@ MANUAL_ACTIVATION_GRACE = 3.0    # 'a' 키로 켠 직후, 손을 카메라 앞�
 HOTKEY_SUPPRESS_AFTER_SEND = 0.5 # 가상 키를 실제로 보낸 직후 창 단축키(a, c, ...) 무시: 카메라 창에 자기 입력이 들어가는 것 방지
 MOUSE_EXIT_SETTLE = 0.4         # 마우스 모드에서 나온 직후 키 입력 막는 시간 (손을 내리는 동작이 키로 잡히지 않게)
 MOUSE_LOST_TIME = 0.6           # 마우스 모드 중 손이 이 시간 이상 안 보이면 마우스 모드 해제
+MAX_HANDS_DETECT = 4             # MediaPipe 가 찾는 손 수 (다른 사람 손이 내 손 자리를 빼앗지 않도록 2보다 크게)
+HAND_SIZE_MIN_RATIO = 0.6        # 등록한 내 손 크기 대비 허용 범위
+HAND_SIZE_MAX_RATIO = 1.7
+SMALL_HAND_RATIO = 0.6           # 가장 큰 손의 이 비율보다 작은 손(멀리 있는 사람)은 무시
+HAND_SELECT_KEEP_DIST = 0.2      # 직전 손 위치에서 이 거리(화면 폭 비율) 안이면 같은 손으로 우선
+HAND_SIZE_ADAPT = 0.01           # 등록 크기가 현재 손 크기를 따라가는 속도 (카메라 거리 변화 적응)
+# 내 손만 인식 (추적 잠금, 기본): 등록한 손에서 이어지는 손만 사용 (hand_lock.py)
+TRACK_BASE_DIST = 50.0           # 프레임 사이 허용 이동 거리 기본값(px)
+TRACK_SPEED = 3000.0             # + 경과 시간 x 이 속도(px/s) 까지 이동 허용 (빠른 손동작)
+REACQUIRE_TIME = 2.0             # 손이 사라진 뒤 이 시간 안에
+REACQUIRE_RADIUS = 0.25          # 사라진 위치 근처(화면 폭 비율)에서 다시 나타나면 같은 손으로 이어 받음
+CLAIM_TIME = 0.6                 # 그 밖엔 손바닥을 이 시간 동안 펴 보이면 비어 있는 자리로 다시 등록
+
+# 내 손만 인식 (몸 기준, --hand-lock body): 손목이 사용자 팔 끝에 붙어 있는 손만 사용
+POSE_EVERY_N_FRAMES = 2          # 포즈 인식은 N프레임마다 (CPU 절약, 사이 프레임은 직전 결과 사용)
+MAX_POSES = 3                    # 동시에 찾을 사람 수
+POSE_MIN_VISIBILITY = 0.3        # 포즈 점이 이보다 안 보이면 없는 것으로 취급
+OWNER_WRIST_TOL = 0.45           # 손 손목 ~ 팔 손목 허용 거리 (어깨너비 배율)
+OWNER_ELBOW_TOL = 1.1            # 팔 손목이 가려졌을 때: 손 손목 ~ 팔꿈치 허용 거리 (어깨너비 배율)
+OWNER_MIN_TOL_PX = 40.0          # 허용 거리 최소값(px)
+OWNER_KEEP_DIST = 0.3            # 등록한 사용자 몸 위치에서 이 거리(화면 폭 비율) 안의 사람만 사용자로 인정
+OWNER_WIDTH_RANGE = (0.6, 1.6)   # 사용자 어깨너비 변화 허용 범위
 HAND_LABEL_MEMORY = 0.25         # 한 손만 보일 때, 직전 손 위치에서 이 거리(화면 폭 비율) 안이면 같은 손으로 유지
+POSE_MODEL_URL = (
+    "https://storage.googleapis.com/mediapipe-models/pose_landmarker/"
+    "pose_landmarker_lite/float16/latest/pose_landmarker_lite.task"
+)
 MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
     "hand_landmarker/float16/latest/hand_landmarker.task"
@@ -133,6 +163,8 @@ class AppConfig:
     overlay_corner: str = "br"        # br | bl | tr | tl
     overlay_scale: float = 1.3
     sensitivity: str = "normal"       # low | normal | high (키 누름 민감도 프리셋)
+    hand_lock: str = "track"          # 내 손만 인식: track | body | strict | size | off
+    pose_model_path: str = DEFAULT_POSE_MODEL_PATH
     mouse_exclusive: bool = True      # 마우스 모드 중 키보드 입력(양손) 전부 멈춤. False 면 왼손은 계속 타이핑
     handedness: str = "position"      # position: 화면 위치로 좌/우 손 판별 | model: MediaPipe 라벨 사용
     run_seconds: float = 0.0          # >0 이면 N초 후 자동 정상 종료 (자동 점검/데모용)

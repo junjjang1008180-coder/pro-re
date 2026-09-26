@@ -33,6 +33,9 @@ python main.py --capture-width 1920 --capture-height 1080   # 실제 실행 (기
 | `keyboard_layout.py` | 키 배치, 손가락별 담당 키, 두벌식 자모 |
 | `keyboard_controller.py` | 손가락별 누름 판정, 기준선, 쿨다운, 키 스냅, FPS 보정 |
 | `mouse_controller.py` | 커서/클릭/더블클릭/드래그 (핀치) |
+| `hand_lock.py` | 내 손만 인식(기본 `track`): 등록한 두 손을 연속성으로 추적, 새 손 무시, 잠깐 가려짐/손바닥 되찾기 |
+| `body_owner.py` | 내 손만 인식: 포즈(어깨-팔꿈치-손목)로 사용자 팔에 붙은 손만 선택, 팔 기준 좌/우 판별 |
+| `hand_selector.py` | 손 크기/연속성 기준 선택 (`--hand-lock size`, 그리고 몸이 안 보일 때 `body` 모드의 대체) |
 | `gesture_controller.py` | 양손 펼침 ACTIVE 전환, 가리키기 자세 → 마우스 모드 |
 | `input_processor.py` | 추론 스레드의 판정 단계 묶음 (OpenCV 비의존) |
 | `input_backend.py` | OS 입력 (Windows SendInput / X11 XTest / macOS CGEvent, ctypes) + 안전 게이트 `InputDispatcher` |
@@ -53,6 +56,10 @@ python main.py --capture-width 1920 --capture-height 1080   # 실제 실행 (기
   마우스와 키보드는 겹치면 안 된다: 마우스 모드 중 양손 키 입력 차단(`--mouse-exclusive`), 가리키기 자세가 보이는 순간
   오른손 차단, 해제 직후 0.4초 차단. 차단된 손가락은 누름 기준선을 버린다 (복귀 시 오입력 방지).
 - 누름 깊이 = 손끝 y − 해당 손가락 MCP y (손 전체 이동은 누름 아님). 자세가 바뀌거나 추적이 재동기화되면 기준선 재설정.
+- **내 손만 인식 기본은 추적 잠금**(`--hand-lock track`, `hand_lock.py`): 양손 펴서 ACTIVE 할 때 두 손을 잠그고,
+  이후 프레임 간 연속성으로만 이어 받는다. 사용자 피드백: 크기 기준은 다른 사람 손을 못 막고, 몸(포즈) 기준은
+  손을 카메라 앞으로 들면 팔이 몸을 가려 인식이 깨진다. `body`/`strict` 는 옵션으로 남김
+  (`HandTracker.detect_all` 이 포즈도 돌려주고 `InputProcessor.process(hands, t, poses)` 로 넘긴다).
 - 화면 문구는 영어(Hershey 폰트). 한글은 `mini_ui.unicode_font()`(OpenCV 5 `FontFace` + 시스템 한글 폰트)로만,
   폰트가 없으면 영문 대체 문구로 동작해야 한다.
 - 새 기능에는 pytest 테스트를 추가하고, 가능하면 `simulation.py` 의 합성 손으로 end-to-end 확인.
