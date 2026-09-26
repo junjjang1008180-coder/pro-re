@@ -305,3 +305,15 @@ def test_request_deactivate_turns_processor_inactive(cfg):
 def test_mouse_exclusive_option():
     assert parse_cli([]).mouse_exclusive is True
     assert parse_cli(["--mouse-exclusive", "false"]).mouse_exclusive is False
+
+
+
+@pytest.mark.parametrize("mode", ["track", "body", "strict", "size", "off"])
+def test_hand_lock_option(mode):
+    assert parse_cli([]).hand_lock == "track"
+    assert parse_cli(["--hand-lock", mode]).hand_lock == mode
+
+
+def test_hand_lock_invalid_mode():
+    with pytest.raises(SystemExit):
+        parse_cli(["--hand-lock", "maybe"])

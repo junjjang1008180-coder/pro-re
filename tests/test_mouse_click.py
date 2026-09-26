@@ -123,11 +123,39 @@ def test_drag_and_drop():
     assert drop.x > start.x                           # 커서가 이동한 위치에서 드롭
 
 
-def test_long_hold_without_move_is_not_click():
+def test_long_hold_starts_drag_without_moving():
+    """핀치를 0.4초 이상 꾹 유지하면 움직이지 않아도 드래그 시작 (클릭 아님)."""
     d = Driver()
     d.frames(5)
-    d.pinch_left(frames=30)                           # 1초 유지 -> 클릭 아님
-    assert d.actions() == []
+    d.pinch_left(frames=30)
+    assert d.actions() == [MouseAction.DRAG_START, MouseAction.DRAG_END]
+
+
+def test_small_move_starts_drag():
+    """12px 정도만 움직여도 드래그 시작 (예전 25px)."""
+    d = Driver()
+    d.frames(5)
+    d.frames(3, thumb=P(INDEX.x + 5, INDEX.y + 3))
+    idx = P(INDEX.x + 14, INDEX.y)
+    d.frames(1, thumb=P(idx.x + 5, idx.y + 3), index=idx)
+    assert d.mc.dragging
+
+
+def test_drag_survives_momentary_pinch_widening():
+    """드래그 중 손을 빨리 움직여 엄지-검지가 잠깐 벌어져도 드롭되지 않는다."""
+    d = Driver()
+    d.frames(5)
+    idx = INDEX
+    d.frames(3, thumb=P(idx.x + 5, idx.y + 3))
+    for i in range(1, 6):
+        idx = P(INDEX.x + i * 10, INDEX.y)
+        d.frames(1, thumb=P(idx.x + 5, idx.y + 3), index=idx)
+    assert d.mc.dragging
+    # 핀치 거리 22*1.5=33px 로 2프레임 벌어짐 (클릭 기준이면 해제, 드래그 기준 1.8배=39.6px 이면 유지)
+    d.frames(2, thumb=P(idx.x + 33, idx.y), index=idx)
+    d.frames(3, thumb=P(idx.x + 5, idx.y + 3), index=idx)
+    assert d.mc.dragging
+    assert MouseAction.DRAG_END not in d.actions()
 
 
 def test_inactive_produces_no_mouse_events():
@@ -318,3 +346,64 @@ def test_click_with_bent_index_pinch_produces_click_not_keys(cfg):
     assert [e.action for e in all_ev if getattr(e, "action", None) not in (None, MouseAction.MOVE)] == \
         [MouseAction.LEFT_CLICK]
     assert not [e for e in all_ev if hasattr(e, "key")]
+
+
+
+# ---------------------------------------------------------------- 내 손만 인식
+from vkeyboard.hand_selector import HandSelector  # noqa: E402
+
+
+def _scaled_hand(label, cx, wrist_y, scale):
+    """open_palm_hand 를 scale 배로 줄이거나 키운 손 (멀리 있는 사람 손 = 작게)."""
+    base = open_palm_hand(label, cx, wrist_y)
+    w = base.landmarks[0]
+    lm = [P(w.x + (p.x - w.x) * scale, w.y + (p.y - w.y) * scale) for p in base.landmarks]
+    return HandObservation(label, lm, base.confidence)
+
+
+def test_selector_ignores_small_far_away_hand():
+    sel = HandSelector(True, 1280)
+    me_l, me_r = _scaled_hand("Left", 400, 600, 1.0), _scaled_hand("Right", 880, 600, 1.0)
+    other = _scaled_hand("Right", 640, 300, 0.45)             # 뒤에 있는 사람 (작게 보임)
+    chosen, ignored = sel.select([other, me_l, me_r])
+    assert me_l in chosen and me_r in chosen and ignored == [other]
+
+
+def test_selector_after_register_ignores_different_sized_hands():
+    sel = HandSelector(True, 1280)
+    me_l, me_r = _scaled_hand("Left", 400, 600, 1.0), _scaled_hand("Right", 880, 600, 1.0)
+    assert sel.register([me_l, me_r])
+    big = _scaled_hand("Right", 1100, 650, 2.0)               # 카메라 바로 앞에 불쑥 들어온 다른 사람 손
+    chosen, ignored = sel.select([big, me_l, me_r])
+    assert set(map(id, chosen)) == {id(me_l), id(me_r)} and ignored == [big]
+
+
+def test_selector_prefers_continuity_between_similar_hands():
+    sel = HandSelector(True, 1280)
+    me_l, me_r = _scaled_hand("Left", 400, 600, 1.0), _scaled_hand("Right", 880, 600, 1.0)
+    sel.register([me_l, me_r])
+    other = _scaled_hand("Right", 640, 620, 1.05)             # 비슷한 크기의 다른 사람 손
+    for _ in range(5):
+        chosen, ignored = sel.select([other, me_l, me_r])
+    assert set(map(id, chosen)) == {id(me_l), id(me_r)} and ignored == [other]
+
+
+def test_selector_disabled_uses_largest_two():
+    sel = HandSelector(False, 1280)
+    a, b, c = (_scaled_hand("Left", 300, 600, 1.0), _scaled_hand("Right", 900, 600, 1.2),
+               _scaled_hand("Right", 640, 300, 0.5))
+    chosen, ignored = sel.select([c, a, b])
+    assert set(map(id, chosen)) == {id(a), id(b)} and ignored == [c]
+
+
+def test_processor_registers_on_activation_and_ignores_extra_hand(cfg):
+    p = InputProcessor(cfg, Calibration.default(), (1920, 1080))
+    me = [open_palm_hand("Left", 400, 600), open_palm_hand("Right", 880, 600)]
+    t = 0.0
+    for _ in range(40):
+        snap, _ = p.process(me, t)
+        t += 1 / 30
+    assert snap.active and snap.hand_registered
+    stranger = _scaled_hand("Right", 640, 250, 0.4)
+    snap, _ = p.process([stranger] + me, t)
+    assert len(snap.hands) == 2 and len(snap.ignored_hands) == 1

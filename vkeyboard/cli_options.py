@@ -47,6 +47,10 @@ def build_parser() -> argparse.ArgumentParser:
     p.add_argument("--overlay-scale", type=float, default=d.overlay_scale, help="HUD 크기 배율")
     p.add_argument("--sensitivity", choices=("low", "normal", "high"), default=d.sensitivity,
                    help="키 누름 민감도: high=얕고 빠른 누름도 인식, low=오입력 최소화")
+    p.add_argument("--hand-lock", choices=("track", "body", "strict", "size", "off"), default=d.hand_lock,
+                   help="내 손만 인식: track=양손 펴서 등록한 손만 계속 추적(새로 들어온 손 무시), "
+                        "body=내 몸(팔)에 붙은 손만, strict=body + 내 몸 안 보이면 손 무시, "
+                        "size=손 크기 기준, off=끔")
     p.add_argument("--mouse-exclusive", type=parse_bool, default=d.mouse_exclusive, metavar="{true,false}",
                    help="마우스 모드 중 키보드 입력을 모두 멈춤 (false 면 왼손은 계속 타이핑 가능)")
     p.add_argument("--handedness", choices=("position", "model"), default=d.handedness,
@@ -101,6 +105,7 @@ def parse_cli(argv: Optional[Sequence[str]] = None) -> AppConfig:
         overlay_corner=args.overlay_corner,
         overlay_scale=args.overlay_scale,
         sensitivity=args.sensitivity,
+        hand_lock=args.hand_lock,
         mouse_exclusive=args.mouse_exclusive,
         handedness=args.handedness,
         run_seconds=args.run_seconds,

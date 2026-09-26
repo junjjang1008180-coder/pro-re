@@ -8,8 +8,8 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import List, Optional, Tuple
 
-from .config import (CLICK_MAX_DURATION, CLICK_RELEASE_FACTOR, DOUBLE_CLICK_MIN_INTERVAL,
-                     DRAG_START_DISTANCE, MOUSE_REGION, ONE_EURO_BETA, ONE_EURO_MIN_CUTOFF,
+from .config import (CLICK_MAX_DURATION, CLICK_RELEASE_FACTOR, DOUBLE_CLICK_MIN_INTERVAL, DRAG_HOLD_TIME,
+                     DRAG_RELEASE_FACTOR, DRAG_RELEASE_FRAMES, DRAG_START_DISTANCE, MOUSE_REGION, ONE_EURO_BETA, ONE_EURO_MIN_CUTOFF,
                      PINCH_MIN_FRAMES, AppConfig, hand_scale)
 from .events import MouseAction, MouseEvent
 from .geometry import (INDEX_TIP, MIDDLE_TIP, THUMB_TIP, HandObservation, Vec2, dist, hand_size)
@@ -29,8 +29,9 @@ class PinchDetector:
         self.closed = False
         self._count = 0
 
-    def update(self, distance: float, threshold: float, t: float, allow_close: bool = True) -> Optional[str]:
-        """'press' | 'release' | None"""
+    def update(self, distance: float, threshold: float, t: float, allow_close: bool = True,
+               release_factor: float = CLICK_RELEASE_FACTOR, release_frames: Optional[int] = None) -> Optional[str]:
+        """'press' | 'release' | None. 드래그 중엔 release_factor/frames 를 크게 줘서 잘 안 끊기게 한다."""
         if not self.closed:
             if allow_close and distance < threshold:
                 self._count += 1
@@ -42,9 +43,9 @@ class PinchDetector:
             else:
                 self._count = 0
             return None
-        if distance > threshold * CLICK_RELEASE_FACTOR:
+        if distance > threshold * release_factor:
             self._count += 1
-            if self._count >= self.min_frames:
+            if self._count >= (release_frames or self.min_frames):
                 self.closed = False
                 self._count = 0
                 return "release"
@@ -124,7 +125,9 @@ class MouseController:
 
         # 둘 다 가까우면 더 가까운 쪽만 핀치로 인정 (좌/우클릭 혼동 방지)
         left_ev = self.left.update(d_left, threshold, t,
-                                   allow_close=not self.right.closed and d_left <= d_right)
+                                   allow_close=not self.right.closed and d_left <= d_right,
+                                   release_factor=DRAG_RELEASE_FACTOR if self.dragging else CLICK_RELEASE_FACTOR,
+                                   release_frames=DRAG_RELEASE_FRAMES if self.dragging else None)
         right_ev = self.right.update(d_right, threshold, t,
                                      allow_close=not self.left.closed and d_right < d_left)
 
@@ -144,9 +147,10 @@ class MouseController:
         # 아직 핀치 거리 안에 있을 때만 판정)
         if left_ev == "press":
             self._down_center = index_tip
-        if (self.left.closed and not self.dragging and self._down_center is not None
-                and d_left < threshold):
-            if dist(index_tip, self._down_center) >= DRAG_START_DISTANCE * scale:
+        if self.left.closed and not self.dragging and self._down_center is not None:
+            moved = d_left < threshold and dist(index_tip, self._down_center) >= DRAG_START_DISTANCE * scale
+            held = t - self.left.closed_at >= DRAG_HOLD_TIME          # 꾹 누르고 있으면 움직이기 전에도 드래그
+            if moved or held:
                 self.dragging = True
                 events.append(MouseEvent(MouseAction.DRAG_START, cx, cy, t, d_left, size, confidence))
         if left_ev == "release":
