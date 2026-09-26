@@ -11,6 +11,7 @@ from __future__ import annotations
 import ctypes
 import ctypes.util
 import sys
+import time
 from abc import ABC, abstractmethod
 from enum import Enum
 from typing import Dict, List, Optional, Set, Tuple
@@ -141,6 +142,8 @@ class WindowsInputBackend(InputBackend):
         self._user32 = ctypes.WinDLL("user32", use_last_error=True)
         self._user32.SendInput.argtypes = (wintypes.UINT, ctypes.POINTER(INPUT), ctypes.c_int)
         self._user32.SendInput.restype = wintypes.UINT
+        self._user32.MapVirtualKeyW.argtypes = (wintypes.UINT, wintypes.UINT)
+        self._user32.MapVirtualKeyW.restype = wintypes.UINT
         try:
             self._user32.SetProcessDPIAware()
         except (AttributeError, OSError):
@@ -150,10 +153,13 @@ class WindowsInputBackend(InputBackend):
         arr = (self._INPUT * len(inputs))(*inputs)
         sent = self._user32.SendInput(len(inputs), arr, ctypes.sizeof(self._INPUT))
         if sent != len(inputs):
-            raise OSError(f"SendInput 실패 (error={ctypes.get_last_error()})")
+            raise OSError(f"SendInput 실패 (error={ctypes.get_last_error()}) — 관리자 권한 창에는 입력을 보낼 수 없습니다")
 
     def _key(self, code: KeyCode, up: bool):
-        ki = self._KEYBDINPUT(wVk=_WIN_VK[code], wScan=0, dwFlags=0x0002 if up else 0, time=0, dwExtraInfo=0)
+        vk = _WIN_VK[code]
+        # 스캔코드도 채워 둔다 (가상키만 보면 일부 앱/게임이 입력을 무시). 한/영 키는 가상키만 보낸다.
+        scan = 0 if code is KeyCode.HAN_ENG else self._user32.MapVirtualKeyW(vk, 0) & 0xFF
+        ki = self._KEYBDINPUT(wVk=vk, wScan=scan, dwFlags=0x0002 if up else 0, time=0, dwExtraInfo=0)
         inp = self._INPUT(type=1)
         inp.u.ki = ki
         return inp
@@ -230,7 +236,11 @@ class X11InputBackend(InputBackend):
 
     def _keycode(self, code: KeyCode) -> int:
         sym = self._x.XStringToKeysym(_X11_KEYSYM[code].encode())
-        return self._x.XKeysymToKeycode(self._dpy, sym)
+        keycode = self._x.XKeysymToKeycode(self._dpy, sym)
+        if keycode == 0:
+            # 키맵에 없는 키(예: 한/영 키가 없는 배열)를 그대로 보내면 X 오류로 프로세스가 종료될 수 있다
+            raise OSError(f"현재 X11 키보드 배열에 '{_X11_KEYSYM[code]}' 키가 없습니다")
+        return keycode
 
     def key_down(self, code: KeyCode) -> None:
         self._xt.XTestFakeKeyEvent(self._dpy, self._keycode(code), 1, 0)
@@ -383,7 +393,11 @@ def query_screen_size(default: Tuple[int, int] = (1920, 1080)) -> Tuple[int, int
         if sys.platform.startswith("win"):
             u = ctypes.windll.user32
             return u.GetSystemMetrics(0), u.GetSystemMetrics(1)
-        return create_platform_backend().screen_size()
+        backend = create_platform_backend()
+        try:
+            return backend.screen_size()
+        finally:
+            backend.close()
     except Exception:  # noqa: BLE001 — 조회 실패 시 기본값
         return default
 
@@ -424,6 +438,23 @@ class InputDispatcher:
         self.last_key_text = "-"
         self.last_mouse_text = "-"
         self.sent_count = 0
+        self.error_count = 0           # OS 입력 전송 실패 횟수 (예: 관리자 권한 창에 포커스)
+        self.last_error = ""
+        self._last_error_print = float("-inf")
+
+    def _safe(self, fn, *args) -> bool:
+        """OS 입력 전송. 실패해도 예외를 올리지 않는다 (입력 한 번 실패로 프로그램이 죽지 않게)."""
+        try:
+            fn(*args)
+            return True
+        except Exception as e:  # noqa: BLE001
+            self.error_count += 1
+            self.last_error = str(e)
+            now = time.monotonic()
+            if now - self._last_error_print > 3.0:
+                self._last_error_print = now
+                print(f"[경고] 실제 입력 전송 실패 (프로그램은 계속 동작): {e}")
+            return False
 
     @property
     def can_send(self) -> bool:
@@ -451,17 +482,21 @@ class InputDispatcher:
             self.last_key_text = f"Shift+{label}" if shift else label
         if not self.can_send:
             return False
+        ok = self._safe(self._send_key, ev.key, shift)
+        if ok:
+            self.sent_count += 1
+        return ok
+
+    def _send_key(self, key: KeyCode, shift: Optional[KeyCode]) -> None:
         if shift:
             self.backend.key_down(shift)
             self._held_keys.add(shift)
         try:
-            self.backend.tap_key(ev.key)
+            self.backend.tap_key(key)
         finally:
             if shift:
                 self.backend.key_up(shift)
                 self._held_keys.discard(shift)
-        self.sent_count += 1
-        return True
 
     # --- 마우스 ---------------------------------------------------------
     def handle_mouse(self, ev: MouseEvent) -> bool:
@@ -472,6 +507,12 @@ class InputDispatcher:
             self.last_mouse_text = names[ev.action]
         if not self.can_send:
             return False
+        ok = self._safe(self._send_mouse, ev)
+        if ok:
+            self.sent_count += 1
+        return ok
+
+    def _send_mouse(self, ev: MouseEvent) -> None:
         b = self.backend
         if ev.action is MouseAction.MOVE:
             b.mouse_move(ev.x, ev.y)
@@ -500,8 +541,6 @@ class InputDispatcher:
             if MouseButton.LEFT in self._held_buttons:
                 b.mouse_button(MouseButton.LEFT, False)
                 self._held_buttons.discard(MouseButton.LEFT)
-        self.sent_count += 1
-        return True
 
     # --- 안전 정지 ------------------------------------------------------
     def release_all(self) -> None:

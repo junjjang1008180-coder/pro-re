@@ -13,7 +13,8 @@ from typing import Optional, Sequence
 
 from .calibration import Calibration
 from .cli_options import parse_cli
-from .config import (DISPLAY_MAX_WIDTH, FRAME_QUEUE_SIZE, KEY_HIGHLIGHT_TIME, MOUSE_FLASH_TIME, AppConfig)
+from .config import (DISPLAY_MAX_WIDTH, FRAME_QUEUE_SIZE, FRAME_STALL_TIMEOUT, HOTKEY_SUPPRESS_AFTER_SEND,
+                     KEY_HIGHLIGHT_TIME, MOUSE_FLASH_TIME, AppConfig)
 from .events import KeyEvent, ModeEvent, MouseAction, MouseEvent
 from .frame_queue import EventQueue, FrameQueue, LatestValue
 from .input_backend import (InputDispatcher, NullInputBackend, create_platform_backend, play_feedback_beep,
@@ -43,14 +44,24 @@ def _print_banner(cfg: AppConfig) -> None:
     print("=" * 60)
 
 
+def _try_save(what: str, fn, path: str) -> bool:
+    """파일 저장 실패(권한, 잘못된 경로 등)로 프로그램이 죽지 않게 한다."""
+    try:
+        fn(path)
+        print(f"[정보] {what} 저장: {path}")
+        return True
+    except OSError as e:
+        print(f"[경고] {what} 저장 실패: {path} ({e})")
+        return False
+
+
 def run(cfg: AppConfig) -> int:
     if cfg.simulate:
         from .simulation import run_simulation
 
         report = run_simulation(cfg)
         if cfg.practice and cfg.practice_output and report.practice_result is not None:
-            report.practice_result.save(cfg.practice_output)
-            print(f"[정보] 연습 결과 저장: {cfg.practice_output}")
+            _try_save("연습 결과", report.practice_result.save, cfg.practice_output)
         return EXIT_OK
 
     import cv2
@@ -84,9 +95,13 @@ def run(cfg: AppConfig) -> int:
         backend = NullInputBackend(query_screen_size())
     dispatcher = InputDispatcher(backend, cfg.real_input_allowed)
 
-    logger: Optional[InputLogger] = InputLogger(cfg.log_input) if cfg.log_input else None
-    if logger:
-        print(f"[정보] 입력 이벤트 CSV 로깅: {cfg.log_input}")
+    logger: Optional[InputLogger] = None
+    if cfg.log_input:
+        try:
+            logger = InputLogger(cfg.log_input)
+            print(f"[정보] 입력 이벤트 CSV 로깅: {cfg.log_input}")
+        except OSError as e:
+            print(f"[경고] 로그 파일을 만들 수 없어 로깅 없이 실행합니다: {cfg.log_input} ({e})")
 
     overlay = None
     capture: Optional[CaptureThread] = None
@@ -114,6 +129,7 @@ def run(cfg: AppConfig) -> int:
             cap.release()
             dispatcher.emergency_stop("손 추적 초기화 실패")
             print(f"[오류] 손 랜드마크 모델 초기화 실패: {e}")
+            print(f"       모델 파일이 손상됐을 수 있습니다. {cfg.model_path} 를 지우고 다시 실행하면 새로 받습니다.")
             return EXIT_MODEL
 
         calibration = Calibration.load(cfg.calibration_file, cfg.infer_width, cfg.infer_height)
@@ -135,7 +151,9 @@ def run(cfg: AppConfig) -> int:
         info = RenderInfo(now=time.monotonic(), capture_size=(cw, ch), test_mode=cfg.test_mode,
                           real_input=cfg.real_input_allowed, backend_name=backend.name, practice=practice)
         cv2.namedWindow(WINDOW, cv2.WINDOW_NORMAL)
-        dw, dh = display_size(cw, ch, DISPLAY_MAX_WIDTH)
+        screen_w, screen_h = backend.screen_size()
+        # 창이 화면보다 커지지 않게 (노트북 1366x768 등)
+        dw, dh = display_size(cw, ch, min(DISPLAY_MAX_WIDTH, int(screen_w * 0.9)), int(screen_h * 0.85))
         cv2.resizeWindow(WINDOW, dw, dh)
 
         calibrating = False
@@ -143,6 +161,10 @@ def run(cfg: AppConfig) -> int:
         last_frame_version = -1
         shown = False
         message_until = 0.0
+        last_sent_key = float("-inf")     # 가상 키를 실제로 보낸 마지막 시각
+        last_snap_version = -1
+        last_snap_change = time.monotonic()
+        stalled = False
 
         started = time.monotonic()
         while True:
@@ -156,6 +178,8 @@ def run(cfg: AppConfig) -> int:
             if capture.error or inference.error:
                 reason = capture.error or inference.error
                 dispatcher.emergency_stop(reason)
+                if inference.error_detail:
+                    print(inference.error_detail)
                 print(f"[오류] {reason} → 실제 입력 중지 후 종료")
                 exit_code = EXIT_CAMERA if capture.error else EXIT_ERROR
                 break
@@ -186,10 +210,10 @@ def run(cfg: AppConfig) -> int:
                             info.practice_result = practice_result
                             print("[연습 완료] " + " | ".join(practice_result.summary_lines()))
                             if cfg.practice_output:
-                                practice_result.save(cfg.practice_output)
-                                print(f"[정보] 연습 결과 저장: {cfg.practice_output}")
+                                _try_save("연습 결과", practice_result.save, cfg.practice_output)
                     else:
-                        dispatcher.handle_key(ev)
+                        if dispatcher.handle_key(ev):
+                            last_sent_key = now
                         info.last_key = f"{dispatcher.last_key_text} ({ev.finger.value})"
                         info.korean = dispatcher.korean
                 elif isinstance(ev, MouseEvent):
@@ -204,8 +228,21 @@ def run(cfg: AppConfig) -> int:
 
             # --- 렌더링 ---
             item, version = display_slot.get()
-            snap, _ = snapshot_slot.get()
-            if item is not None and version != last_frame_version:
+            snap, snap_version = snapshot_slot.get()
+
+            # --- 영상/판정이 멈춤 감시: 드래그 중 멈추면 마우스 버튼이 눌린 채 남을 수 있다 ---
+            if snap_version != last_snap_version:
+                last_snap_version, last_snap_change, stalled = snap_version, now, False
+            elif not stalled and dispatcher.active and now - last_snap_change > FRAME_STALL_TIMEOUT:
+                stalled = True
+                dispatcher.set_active(False)          # 눌린 버튼/키 해제 + 입력 중지
+                processor.request_deactivate()        # 판정 쪽도 다음 프레임에 INACTIVE 로 맞춤
+                info.message = "Video stalled -> INACTIVE (input stopped)"
+                message_until = now + 3.0
+                print("[안전] 영상이 멈춤 → INACTIVE 전환, 실제 입력 중지")
+
+            new_frame = item is not None and version != last_frame_version
+            if new_frame:
                 last_frame_version = version
                 canvas = item.image.copy()   # 추론 스레드가 같은 프레임을 읽는 중일 수 있으므로 복사본에 그림
                 info.display_fps = fps.tick(now)
@@ -220,7 +257,10 @@ def run(cfg: AppConfig) -> int:
                 if overlay is not None:
                     overlay.show(snap, info)
 
-            key = cv2.waitKey(1) & 0xFF
+            key = cv2.waitKey(1 if new_frame else 5) & 0xFF   # 새 프레임이 없으면 조금 쉬어 CPU 절약
+            if key not in (255, 27) and cfg.real_input_allowed and now - last_sent_key < HOTKEY_SUPPRESS_AFTER_SEND:
+                # 카메라 창에 포커스가 있을 때 가상 키보드로 보낸 'a', 'c' 등이 창 단축키로 오작동하지 않게
+                key = 255
             if key == 27:  # ESC
                 print("[종료] ESC 입력")
                 break
@@ -274,10 +314,9 @@ def run(cfg: AppConfig) -> int:
                     else:
                         print("[캘리브레이션] 양손 검지가 모두 보여야 합니다")
                 elif ch_key == "s":
-                    cal_edit.save(cfg.calibration_file)
                     processor.set_calibration(cal_edit)
-                    print(f"[캘리브레이션] 저장 완료: {cfg.calibration_file}")
-                    info.message = "Calibration saved"
+                    saved = _try_save("캘리브레이션", cal_edit.save, cfg.calibration_file)
+                    info.message = "Calibration saved" if saved else "Calibration save FAILED"
                     message_until = now + 2.0
                 processor.set_calibration(cal_edit)
     except KeyboardInterrupt:
@@ -303,8 +342,7 @@ def run(cfg: AppConfig) -> int:
             logger.close()
             print(f"[정보] 로그 {logger.rows_written}건 저장: {cfg.log_input}")
         if practice is not None and practice_result is None and practice.total > 0 and cfg.practice_output:
-            practice.result(time.monotonic()).save(cfg.practice_output)
-            print(f"[정보] (미완료) 연습 결과 저장: {cfg.practice_output}")
+            _try_save("(미완료) 연습 결과", practice.result(time.monotonic()).save, cfg.practice_output)
         try:
             import cv2
 
@@ -316,6 +354,12 @@ def run(cfg: AppConfig) -> int:
 
 
 def main(argv: Optional[Sequence[str]] = None) -> int:
+    # 한글 메시지를 출력할 수 없는 콘솔/파이프(영문 Windows 등)에서 print 가 예외로 죽지 않게
+    for stream in (sys.stdout, sys.stderr):
+        try:
+            stream.reconfigure(errors="replace")
+        except (AttributeError, ValueError):
+            pass
     cfg = parse_cli(argv)
     return run(cfg)
 

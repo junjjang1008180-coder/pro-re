@@ -9,6 +9,7 @@
 """
 from __future__ import annotations
 
+import os
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -88,7 +89,21 @@ FRAME_QUEUE_SIZE = 2             # 최신 프레임 1~2개만 유지
 DISPLAY_MAX_WIDTH = 1920         # 창에 표시할 최대 폭 (그리기는 캡처 해상도에서 수행)
 CAMERA_FAIL_LIMIT = 30           # 연속 읽기 실패 허용 횟수
 
-DEFAULT_MODEL_PATH = "models/hand_landmarker.task"
+# 기본 파일 경로는 실행 위치(현재 폴더)가 아니라 프로젝트 폴더 기준 -> 어디서 실행해도 같은 파일을 쓴다
+PROJECT_ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
+DEFAULT_MODEL_PATH = os.path.join(PROJECT_ROOT, "models", "hand_landmarker.task")
+DEFAULT_CALIBRATION_FILE = os.path.join(PROJECT_ROOT, "calibration.json")
+DEFAULT_PRACTICE_OUTPUT = os.path.join(PROJECT_ROOT, "practice_result.json")
+MIN_MODEL_BYTES = 1_000_000      # 이보다 작은 모델 파일은 다운로드 실패/손상으로 간주
+MODEL_DOWNLOAD_TIMEOUT = 30.0    # 초
+
+# 안전/안정성
+FRAME_STALL_TIMEOUT = 1.0        # ACTIVE 중 판정 결과가 이 시간 이상 안 오면(영상 멈춤) 입력 중지
+MANUAL_ACTIVATION_GRACE = 3.0    # 'a' 키로 켠 직후, 손을 카메라 앞으로 가져올 시간 (추적 실패 판정 유예)
+HOTKEY_SUPPRESS_AFTER_SEND = 0.5 # 가상 키를 실제로 보낸 직후 창 단축키(a, c, ...) 무시: 카메라 창에 자기 입력이 들어가는 것 방지
+MOUSE_EXIT_SETTLE = 0.4         # 마우스 모드에서 나온 직후 키 입력 막는 시간 (손을 내리는 동작이 키로 잡히지 않게)
+MOUSE_LOST_TIME = 0.6           # 마우스 모드 중 손이 이 시간 이상 안 보이면 마우스 모드 해제
+HAND_LABEL_MEMORY = 0.25         # 한 손만 보일 때, 직전 손 위치에서 이 거리(화면 폭 비율) 안이면 같은 손으로 유지
 MODEL_URL = (
     "https://storage.googleapis.com/mediapipe-models/hand_landmarker/"
     "hand_landmarker/float16/latest/hand_landmarker.task"
@@ -107,10 +122,10 @@ class AppConfig:
 
     test_mode: bool = True
     enable_real_input: bool = False
-    calibration_file: str = "calibration.json"
+    calibration_file: str = DEFAULT_CALIBRATION_FILE
     log_input: Optional[str] = None
     practice: bool = False
-    practice_output: Optional[str] = "practice_result.json"
+    practice_output: Optional[str] = DEFAULT_PRACTICE_OUTPUT
     model_path: str = DEFAULT_MODEL_PATH
     simulate: bool = False
     beep: bool = False
@@ -118,6 +133,7 @@ class AppConfig:
     overlay_corner: str = "br"        # br | bl | tr | tl
     overlay_scale: float = 1.3
     sensitivity: str = "normal"       # low | normal | high (키 누름 민감도 프리셋)
+    mouse_exclusive: bool = True      # 마우스 모드 중 키보드 입력(양손) 전부 멈춤. False 면 왼손은 계속 타이핑
     handedness: str = "position"      # position: 화면 위치로 좌/우 손 판별 | model: MediaPipe 라벨 사용
     run_seconds: float = 0.0          # >0 이면 N초 후 자동 정상 종료 (자동 점검/데모용)
 

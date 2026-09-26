@@ -1,4 +1,6 @@
 """CLI 오버라이드 / 테스트 모드·실제 입력 안전장치 / ACTIVE 전환 제스처."""
+import os
+
 import pytest
 from conftest import P
 
@@ -20,7 +22,9 @@ def test_defaults_without_arguments():
     assert cfg == AppConfig()
     assert (cfg.camera_index, cfg.capture_width, cfg.capture_height) == (0, 3840, 2160)
     assert cfg.test_mode is True and cfg.enable_real_input is False
-    assert cfg.calibration_file == "calibration.json"
+    # 기본 파일들은 실행 위치와 무관하게 프로젝트 폴더에 둔다
+    assert os.path.isabs(cfg.calibration_file) and os.path.basename(cfg.calibration_file) == "calibration.json"
+    assert os.path.isabs(cfg.model_path) and cfg.model_path.endswith("hand_landmarker.task")
     assert cfg.log_input is None and cfg.practice is False
 
 
@@ -241,3 +245,63 @@ def test_sensitivity_presets(level, press, frames):
 def test_explicit_values_override_sensitivity():
     cfg = parse_cli(["--sensitivity", "high", "--press-distance", "16"])
     assert cfg.press_distance == 16 and cfg.min_down_frames == 2
+
+
+# ---------------------------------------------------------------- 리뷰 수정 사항
+@pytest.mark.parametrize("args", [
+    ["--overlay-scale", "0"], ["--overlay-scale", "10"], ["--min-down-frames", "0"],
+    ["--press-distance", "-5"], ["--key-cooldown", "-1"],
+])
+def test_invalid_cli_values_are_rejected(args):
+    with pytest.raises(SystemExit):
+        parse_cli(args)
+
+
+class _FailingBackend(RecordingInputBackend):
+    """관리자 권한 창에 포커스가 있을 때처럼 SendInput 이 실패하는 백엔드."""
+
+    def key_down(self, code):
+        raise OSError("SendInput 실패")
+
+    def mouse_button(self, button, down):
+        raise OSError("SendInput 실패")
+
+
+def test_backend_failure_does_not_crash_and_is_counted():
+    d = InputDispatcher(_FailingBackend(), True)
+    d.set_active(True)
+    assert d.handle_key(KEY) is False                      # 예외 대신 False
+    assert d.handle_mouse(MouseEvent(MouseAction.DRAG_START, 5, 5, 0.0)) is False
+    assert d.error_count == 2 and "SendInput" in d.last_error
+    assert not d._held_buttons                              # 실패한 드래그는 '눌림'으로 기록하지 않음
+    d.emergency_stop("종료")                                 # 정지 경로도 예외 없음
+
+
+def test_manual_activation_gives_time_to_bring_hands(cfg):
+    """'a' 키로 켠 직후엔 손이 안 보여도 바로 추적 실패로 꺼지지 않는다."""
+    p = InputProcessor(cfg, Calibration.default(), (1920, 1080))
+    p.request_toggle()
+    events, t = [], 0.0
+    for _ in range(60):                                     # 2초 동안 손 없음
+        events += p.process([], t)[1]
+        t += 1 / 30
+    assert p.gesture.active
+    for _ in range(60):                                     # 유예(3초)가 지나면 추적 실패로 INACTIVE
+        events += p.process([], t)[1]
+        t += 1 / 30
+    assert not p.gesture.active
+    assert [e.reason for e in events if isinstance(e, ModeEvent)] == ["manual", "tracking_lost"]
+
+
+def test_request_deactivate_turns_processor_inactive(cfg):
+    p = InputProcessor(cfg, Calibration.default(), (1920, 1080))
+    p.gesture.set_active(True)
+    p.request_deactivate()
+    _, events = p.process([], 0.0)
+    assert not p.gesture.active
+    assert [(e.active, e.reason) for e in events if isinstance(e, ModeEvent)] == [(False, "stall")]
+
+
+def test_mouse_exclusive_option():
+    assert parse_cli([]).mouse_exclusive is True
+    assert parse_cli(["--mouse-exclusive", "false"]).mouse_exclusive is False

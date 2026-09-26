@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+import traceback
 from dataclasses import dataclass
 from typing import Optional, Tuple
 
@@ -55,7 +56,15 @@ def open_camera(index: int, width: int, height: int):
     for w, h in candidates:
         cap.set(cv2.CAP_PROP_FRAME_WIDTH, w)
         cap.set(cv2.CAP_PROP_FRAME_HEIGHT, h)
-        ok, frame = cap.read()
+        ok, frame = False, None
+        for _ in range(3):
+            t0 = time.monotonic()
+            ok, frame = cap.read()
+            if ok and frame is not None:
+                break
+            if time.monotonic() - t0 > 1.0:
+                break               # 오래 걸린 실패 = 장치 점유/차단 -> 재시도해도 소용없음
+            time.sleep(0.2)         # 켜진 직후 첫 프레임이 비는 카메라가 있어 짧게 재시도
         if not ok or frame is None:
             # 해상도 미지원이면 카메라가 다른 해상도로라도 프레임을 준다.
             # 읽기 자체가 실패 = 장치 사용 중/권한 차단 (MSMF 는 1회 타임아웃이 ~10초) -> 즉시 포기
@@ -142,6 +151,7 @@ class InferenceThread(threading.Thread):
         self.snapshot_slot = snapshot_slot
         self._stop_evt = threading.Event()
         self.error: Optional[str] = None
+        self.error_detail = ""
         self.fps = 0.0
 
     def stop(self) -> None:
@@ -169,6 +179,7 @@ class InferenceThread(threading.Thread):
                 self.event_queue.put_many(events)
                 self.snapshot_slot.set(snap)
         except Exception as e:  # noqa: BLE001
+            self.error_detail = traceback.format_exc()
             self.error = f"추론 스레드 예외: {e}"
 
 
@@ -186,7 +197,9 @@ class FpsCounter:
         return self.fps
 
 
-def display_size(width: int, height: int, max_width: int) -> Tuple[int, int]:
-    if width <= max_width:
-        return width, height
-    return max_width, int(round(height * max_width / width))
+def display_size(width: int, height: int, max_width: int, max_height: Optional[int] = None) -> Tuple[int, int]:
+    """비율을 유지하면서 max_width x max_height 안에 들어가는 창 크기."""
+    scale = min(1.0, max_width / width)
+    if max_height:
+        scale = min(scale, max_height / height)
+    return max(1, int(round(width * scale))), max(1, int(round(height * scale)))

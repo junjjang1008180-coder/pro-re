@@ -1,4 +1,7 @@
-opencv-python>=4.8
+# Python 3.10 ~ 3.13 (MediaPipe 가 지원하는 버전)
+# MediaPipe 가 opencv-contrib-python 에 의존하므로 같은 패키지를 쓴다.
+# opencv-python 을 함께 설치하면 두 패키지가 같은 cv2 폴더를 덮어써 import 오류가 날 수 있다.
+opencv-contrib-python>=4.8
 mediapipe>=0.10.14
 numpy>=1.24
 pytest>=7.0
